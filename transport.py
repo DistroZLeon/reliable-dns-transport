@@ -12,30 +12,31 @@ class Packet:
     DWN= 0x10   # Download
     UPL= 0x20   # Upload
 
-    def __init__(self, ack_num: int, flags: int, data: bytes= b''):
-        self.ack_num= ack_num
-        self.flags= flags
-        self.data= data
+    def __init__(self, session_id: int, ack_num: int, flags: int, data: bytes= b''):
+        self.session_id = session_id
+        self.ack_num = ack_num
+        self.flags = flags
+        self.data = data
 
     def pack(self)-> bytes:
-        header= struct.pack(">IB", self.ack_num, self.flags)
-        return header+ self.data
+        header = struct.pack(">IIB", self.session_id, self.ack_num, self.flags)
+        return header + self.data
 
     @classmethod
     def unpack(cls, raw_data: bytes):
-        if len(raw_data)< 5:
-            raise ValueError("Payload is to short to contain a valid header!")
+        if len(raw_data) < 9:
+            raise ValueError("Payload is too short to contain a valid 9-byte header!")
 
-        ack_num, flags= struct.unpack(">IB", raw_data[:5])
-        data= raw_data[5:]
+        session_id, ack_num, flags = struct.unpack(">IIB", raw_data[:9])
+        data = raw_data[9:]
 
-        return cls(ack_num, flags, data)
+        return cls(session_id, ack_num, flags, data)
 
-    def has_flag(self, flag: int)-> bool:
-        return (self.flags& flag)!= 0
+    def has_flag(self, flag: int) -> bool:
+        return (self.flags & flag) != 0
 
     def __str__(self):
-        current_flags=[]
+        current_flags = []
         if self.has_flag(self.SYN): current_flags.append("SYN")
         if self.has_flag(self.ACK): current_flags.append("ACK")
         if self.has_flag(self.FIN): current_flags.append("FIN")
@@ -43,7 +44,7 @@ class Packet:
         if self.has_flag(self.DWN): current_flags.append("DWN")
         if self.has_flag(self.UPL): current_flags.append("UPL")
 
-        return f"[Packet | ACK: {self.ack_num} | FLAGS: {'+'.join(current_flags)} | Payload: {len(self.data)} bytes]"
+        return f"[Packet | SESS: {self.session_id} | ACK: {self.ack_num} | FLAGS: {'+'.join(current_flags)} | Payload: {len(self.data)} bytes]"
 
 class Fragmenter:
     UPSTREAM_SIZE= 110
