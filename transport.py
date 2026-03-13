@@ -9,6 +9,8 @@ class Packet:
     ACK= 0x02   # Acknowledge received data
     FIN= 0x04   # End connection
     DAT= 0x08   # Contains data
+    DWN= 0x10   # Download
+    UPL= 0x20   # Upload
 
     def __init__(self, ack_num: int, flags: int, data: bytes= b''):
         self.ack_num= ack_num
@@ -38,6 +40,8 @@ class Packet:
         if self.has_flag(self.ACK): current_flags.append("ACK")
         if self.has_flag(self.FIN): current_flags.append("FIN")
         if self.has_flag(self.DAT): current_flags.append("DAT")
+        if self.has_flag(self.DWN): current_flags.append("DWN")
+        if self.has_flag(self.UPL): current_flags.append("UPL")
 
         return f"[Packet | ACK: {self.ack_num} | FLAGS: {'+'.join(current_flags)} | Payload: {len(self.data)} bytes]"
 
