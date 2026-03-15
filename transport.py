@@ -48,7 +48,7 @@ class Packet:
 
 class Fragmenter:
     UPSTREAM_SIZE= 110
-    DOWNSTREAM_SIZE= 200
+    DOWNSTREAM_SIZE= 800
 
     @staticmethod
     def read_chunk(filepath: str, seq_num: int, chunk_size: int)-> bytes:
