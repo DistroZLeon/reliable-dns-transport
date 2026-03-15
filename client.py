@@ -6,6 +6,7 @@ import socket
 import time
 from transport import Packet, Fragmenter
 from crypto_utils import HandshakeManager, Channel, decode_txt, encode_qname
+
 class Client:
     def __init__(self):
         load_dotenv()

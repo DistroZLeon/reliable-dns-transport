@@ -1,217 +1,242 @@
 import os
-from dotenv import load_dotenv
-from dnslib import *
-import matplotlib
-import socket
 import json
 import time
+import socket
+import hashlib
+import math
+import struct
+from dotenv import load_dotenv
+from dnslib import *
 from transport import Packet, Fragmenter
 from crypto_utils import HandshakeManager, Channel, decode_qname, encode_txt
 
-files={}
-load_dotenv()
+class Server:
+    def __init__(self):
+        load_dotenv()
+        self.domain = os.getenv('DOMAIN')
+        self.authoritative = os.getenv('AUTHORATIVE')
+        self.udp_port = int(os.getenv('UDP_PORT'))
+        self.udp_ip = os.getenv('UDP_IP')
+        self.ipv4 = os.getenv('IPV4')
+        self.password = os.getenv('PASSWORD')
+        self.active_sessions = {}
+        self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
+        self.sock.bind((self.udp_ip, self.udp_port))
+        print(f"* DNS Server listening on {self.udp_ip}:{self.udp_port} for {self.domain}...")
 
-domain= os.getenv('DOMAIN')
-authorative= os.getenv('AUTHORATIVE')
-udp_port= int(os.getenv('UDP_PORT'))
-udp_ip= os.getenv('UDP_IP')
-json_file= os.getenv('JSON_FILE')
-ipv4= os.getenv('IPV4')
-password= os.getenv('PASSWORD')
-active_sessions={}
-
-
-sock= socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
-sock.bind((udp_ip, udp_port))
-try:
-    while(True):
-        data, addr= sock.recvfrom(4096)
-        try:
-            req = DNSRecord.parse(data)
-        except Exception as e:
-            print(f"- Dropped malformed DNS packet from {addr}: {e}")
-            continue
-        qname= str(req.q.qname)
-        qtype= QTYPE[req.q.qtype]
-        print(f"Received request with qname {qname} of type {qtype} from address {addr}")
-
-        if qname.endswith("." ):
-            qname= qname[:-1]
-        qname= qname.lower()
-        if qname.endswith(domain):
-            cl= len(domain)+ 1
-            parts= qname[:-cl]
-        elif qname== authorative:
-            parts= ""
-        else:
-            continue
-
-        rep= req.reply()
-        if qtype== "NS" and qname== domain:
-            rep.add_answer(RR(rname= qname, rtype= QTYPE.NS, ttl= 300, rdata= NS(authorative)))
-            rep.add_ar(RR(rname= authorative+ '.', rtype= QTYPE.A, ttl= 300, rdata= A(ipv4)))
-
-        elif qtype== "A" and qname== authorative:
-            rep.add_answer(RR(rname= qname, rtype= QTYPE.A, ttl= 300, rdata= A(ipv4)))
-
-        elif qtype== "SOA" and qname== domain:
-            dyn_serial= int(time.time())
-            rep.add_answer(RR(rname= qname, rtype= QTYPE.SOA, ttl= 300, 
-                              rdata= SOA(
-                                  mname= authorative, 
-                                  rname= "admin."+ domain,
-                                  times= (
-                                      dyn_serial, # Serial number
-                                      3600,       # Refresh
-                                      3600,       # Retry
-                                      86400,      # Expire
-                                      300         # Minimum TTL
-                                  )
-                              )))
-
-        elif qtype== "TXT":
-            if not parts:
-                continue
+    def get_file_metadata(self, filepath: str):
+            if not os.path.exists(filepath):
+                return (0, b"")
+                
+            file_size = os.path.getsize(filepath)
+            total_chunks = math.ceil(file_size / Fragmenter.DOWNSTREAM_SIZE)
             
-            rdata=""
+            sha256_hash = hashlib.sha256()
+            with open(filepath, "rb") as f:
+                for byte_block in iter(lambda: f.read(4096), b""):
+                    sha256_hash.update(byte_block)
+                    
+            return (total_chunks, sha256_hash.digest())
 
-            parts= parts.split('.')
-            if len(parts)< 3:
-                print(f"- Malformed TXT query from {addr}: {qname}!")
-                continue
+    def _cleanup_session(self, session_id: int):
+        if session_id in self.active_sessions:
+            file_handle = self.active_sessions[session_id].get("file_handle")
+            if file_handle and not file_handle.closed:
+                file_handle.close()
+            del self.active_sessions[session_id]
+            print(f"+ Closed Session {session_id}.")
 
-            try:
-                session_id= int(parts[-1])
-                seq_num= int(parts[-2])
-            except ValueError:
-                print(f"- Malformed TXT query from {addr}: {qname} (bad types for sessionId and seqNum)!")
-                continue
+    def handle_handshake(self, session_id: int, addr: tuple, raw_data: bytes):
+        print(f"# Initiating Handshake for session {session_id} from {addr}!")
+        hsm = HandshakeManager(self.password)
 
-            data= "".join(parts[:-2])
-            try:
-                raw_data= decode_qname(data)
-            except Exception as e:
-                print(f"- Base32 decode failed: {e}!")
-                continue
+        if len(raw_data) < 74:
+            print(f"- Malformed handshake length from {addr}!")
+            return b""
 
-            if seq_num== 0:
-                print(f"# Initiating Handshake for session {session_id}!")
-                hsm= HandshakeManager(password)
+        data, client_hmac = raw_data[:-32], raw_data[-32:]
 
-                if len(raw_data)< 74:
-                    print(f"- Malformed TXT query from {addr}: {qname}! (doesn't respect the pubKey+ hmac format)!")
-                    continue
-                data= raw_data[:-32]
-                client_hmac= raw_data[-32:]
+        if not hsm.verify_hmac(data, client_hmac):
+            print(f"- HMAC verification failed from {addr}!")
+            return b""
 
-                if not hsm.verify_hmac(data, client_hmac):
-                    print(f"- Wrong password from {addr}")
-                    continue
+        try:
+            packet = Packet.unpack(data)
+        except Exception as e:
+            print(f"- Failed to unpack handshake: {e}")
+            return b""
+
+        if packet.session_id != session_id:
+            print(f"- Session fixation attempt from {addr}! Dropping.")
+            return b""
+
+        if not packet.has_flag(Packet.SYN):
+            print(f"- Handshake missing SYN flag from {addr}!")
+            return b""
+
+        session_key = hsm.obtain_session_key(packet.data)
+        self.active_sessions[session_id] = {"key": session_key}
+        print(f"+ Obtained Crypto Key for Session {session_id}!")
+
+        server_pub = hsm.get_pub_bytes()
+        server_packet = Packet(session_id=session_id, ack_num=0, flags=Packet.SYN | Packet.ACK, data=server_pub)
+        server_bytes = server_packet.pack()
+        server_hmac = hsm.gen_hmac(server_bytes)
+        
+        return encode_txt(server_bytes + server_hmac).encode('utf-8')
+
+    def handle_data_phase(self, session_id: int, seq_num: int, raw_data: bytes):
+        session = self.active_sessions.get(session_id)
+        if not session:
+            print(f"- Unauthorized packet for unknown session {session_id}!")
+            return b""
+
+        channel = Channel(session["key"])
+
+        try:
+            decrypted_data = channel.decrypt_chunk(session_id, seq_num, raw_data)
+            packet = Packet.unpack(decrypted_data)
+        except Exception as e:
+            print(f"- Integrity failed for session {session_id}: {e}")
+            return b""
+
+        #Sending Metadata
+        if seq_num == 1:
+            filename = packet.data.decode('utf-8')
+            session["filename"] = filename
+
+            if packet.has_flag(Packet.UPL):
+                session["action"] = "upload"
+                session["file_handle"] = open(filename, "wb")
+                print(f"* Session {session_id} initiated UPLOAD for: {filename}")
                 
-                try:
-                    packet= Packet.unpack(data)
-                except Exception as e:
-                    print(f"- Failed to unpack handshake: {e}")
-                    continue
+                resp_packet = Packet(session_id=session_id, ack_num=seq_num, flags=Packet.ACK)
+
+            elif packet.has_flag(Packet.DWN):
+                session["action"] = "download"
+                print(f"* Session {session_id} requested DOWNLOAD for: {filename}")
                 
-                if packet.session_id != session_id:
-                    print(f"- Session fixation attempt from {addr}! Dropping packet.")
-                    continue
-
-                if not packet.has_flag(Packet.SYN):
-                    print(f"- Handshake packet missing SYN flag from {addr}")
-                    continue
-
-                client_pub= packet.data
-                session_key= hsm.obtain_session_key(client_pub)
-                active_sessions[session_id]= {"key": session_key}
-
-                print(f"# Obtained Crypto Key for Session {session_id}!")
-
-                server_pub= hsm.get_pub_bytes()
-
-                server_packet= Packet(session_id= session_id, ack_num= 0, flags= Packet.SYN| Packet.ACK, data= server_pub)
-                server_bytes= server_packet.pack()
-
-                server_hmac= hsm.gen_hmac(server_bytes)
-
-                rdata= encode_txt(server_bytes+ server_hmac)
-
-            else:
-                if session_id not in active_sessions:
-                    print(f"- Unauthorized packet for unknown session {session_id}!")
-                    continue
-
-                channel= Channel(active_sessions[session_id]["key"])
-
-                try:
-                    decrypted_data= channel.decrypt_chunk(session_id, seq_num, raw_data)
-
-                    packet= Packet.unpack(decrypted_data)
-
-                except Exception as e:
-                    print(f"- Integrity check or unpack failed: {e}!")
-                    continue
-
-                print(f"* Decrypted packet {packet}!")
-
-                if packet.has_flag(Packet.DAT):
-
-                    if seq_num== 1:
-                        true_filename= packet.data.decode('utf-8')
-                        active_sessions[session_id]["filename"]= true_filename
-                        
-                        if packet.has_flag(Packet.UPL):
-                            active_sessions[session_id]["action"]= "upload"
-                            Fragmenter.init_empty(true_filename)
-                            print(f"# Session {session_id} initiated transfer for: {true_filename}")
-                        
-                        elif packet.has_flag(Packet.DWN):
-                            active_sessions[session_id]["action"]= "download"
-                            total_chunks= Fragmenter.get_total_chunks(true_filename, Fragmenter.DOWNSTREAM_SIZE)
-                            active_sessions[session_id]["total_chunks"]= total_chunks
-                            print(f"# Session {session_id} initiated DOWNLOAD for: {true_filename} ({total_chunks} chunks)")
-                    else:
-                        action= active_sessions[session_id].get("action", "upload")
-                        if action== "upload":
-                            target= active_sessions[session_id].get("filename", f"upload_{session_id}.bin")
-                            Fragmenter.write_chunk(target, packet.data)
-                            print(f"+ Saved {len(packet.data)} bytes to {target}!")
-
-                action= active_sessions[session_id].get("action", "upload")
-
-                if action== "download" and seq_num> 1:
-                    target= active_sessions[session_id].get("filename")
-                    total_chunks= active_sessions[session_id].get("total_chunks")
-
-                    chunk_idx= seq_num- 1
-
-                    if chunk_idx<= total_chunks:
-                        file_data= Fragmenter.read_chunk(target, chunk_idx, Fragmenter.DOWNSTREAM_SIZE)
-
-                        rflags= Packet.ACK| Packet.DAT
-                        if chunk_idx== total_chunks:
-                            rflags|= Packet.FIN
-
-                        ack_packet= Packet(session_id= session_id, ack_num= seq_num, flags= rflags, data= file_data)
-
-                    else:
-                        ack_packet= Packet(session_id= session_id, ack_num= seq_num, flags= Packet.FIN)
-
+                total_chunks, raw_hash = self.get_file_metadata(filename)
+                if total_chunks == 0:
+                    print(f"- Client requested non-existent file: {filename}")
+                    resp_packet = Packet(session_id=session_id, ack_num=seq_num, flags=Packet.FIN)
                 else:
-                    ack_packet= Packet(session_id= session_id, ack_num= seq_num, flags= Packet.ACK)
+                    session["total_chunks"] = total_chunks
+                    session["file_handle"] = open(filename, "rb")
+                    
+                    import struct
+                    meta_payload = struct.pack(">I32s", total_chunks, raw_hash)
+                    
+                    resp_packet = Packet(session_id=session_id, ack_num=seq_num, flags=Packet.ACK | Packet.DAT, data=meta_payload)
+                    print(f"+ Packed Metadata: {total_chunks} chunks + 32-byte raw hash.")
 
-                enc_ack= channel.encrypt_chunk(session_id, seq_num, ack_packet.pack())
-                rdata= encode_txt(enc_ack)
+        # Sending Chunks
+        else:
+            action = session.get("action")
+            file_handle = session.get("file_handle")
 
-                if packet.has_flag(Packet.FIN):
-                    print(f"+ Finalized transfer for Session {session_id}!")
-                    del active_sessions[session_id]
+            if action == "upload":
+                if packet.data and file_handle:
+                    file_handle.write(packet.data)
+                
+                resp_packet = Packet(session_id=session_id, ack_num=seq_num, flags=Packet.ACK)
 
-            rep.add_answer(RR(rname= req.q.qname, rtype= QTYPE.TXT, ttl= 0, rdata= TXT(rdata)))
+            elif action == "download":
+                if not packet.has_flag(Packet.ACK):
+                    print(f"- Protocol Violation: Client requested chunk {seq_num} without ACK flag!")
+                    return b""
 
-        sock.sendto(rep.pack(), addr)
+                if file_handle:
+                    file_data = file_handle.read(Fragmenter.DOWNSTREAM_SIZE)
+                    
+                    resp_flags = Packet.ACK | Packet.DAT
+                    if not file_data:
+                        resp_flags |= Packet.FIN
+                        
+                    resp_packet = Packet(session_id=session_id, ack_num=seq_num, flags=resp_flags, data=file_data)
+                else:
+                    resp_packet = Packet(session_id=session_id, ack_num=seq_num, flags=Packet.FIN)
 
-except KeyboardInterrupt:
-    sock.close()
-    print(domain+ " "+ authorative+ " "+ str(udp_port)+ " "+ ipv4)
+        if packet.has_flag(Packet.FIN):
+            self._cleanup_session(session_id)
+
+        enc_resp = channel.encrypt_chunk(session_id, seq_num, resp_packet.pack())
+        return encode_txt(enc_resp).encode('utf-8')
+
+    def run(self):
+        while True:
+            try:
+                data, addr = self.sock.recvfrom(4096)
+                try:
+                    req = DNSRecord.parse(data)
+                except Exception as e:
+                    continue
+
+                qname = str(req.q.qname).lower().rstrip('.')
+                qtype = QTYPE[req.q.qtype]
+
+                if qname.endswith(self.domain):
+                    parts = qname[:-(len(self.domain) + 1)]
+                elif qname == self.authoritative:
+                    parts = ""
+                else:
+                    continue
+
+                rep = req.reply()
+                
+                if qtype== "NS" and qname== domain:
+                    rep.add_answer(RR(rname= qname, rtype= QTYPE.NS, ttl= 300, rdata= NS(authorative)))
+                    rep.add_ar(RR(rname= authorative+ '.', rtype= QTYPE.A, ttl= 300, rdata= A(ipv4)))
+
+                elif qtype== "A" and qname== authorative:
+                    rep.add_answer(RR(rname= qname, rtype= QTYPE.A, ttl= 300, rdata= A(ipv4)))
+
+                elif qtype== "SOA" and qname== domain:
+                    dyn_serial= int(time.time())
+                    rep.add_answer(RR(rname= qname, rtype= QTYPE.SOA, ttl= 300, 
+                                    rdata= SOA(
+                                        mname= authorative, 
+                                        rname= "admin."+ domain,
+                                        times= (
+                                            dyn_serial, # Serial number
+                                            3600,       # Refresh
+                                            3600,       # Retry
+                                            86400,      # Expire
+                                            300         # Minimum TTL
+                                        )
+                                    )))
+                
+                elif qtype == "TXT" and parts:
+                    labels = parts.split('.')
+                    if len(labels) < 3:
+                        continue
+                    
+                    try:
+                        session_id = int(labels[-1])
+                        seq_num = int(labels[-2])
+                        raw_data = decode_qname("".join(labels[:-2]))
+                    except Exception:
+                        continue
+
+                    if seq_num == 0:
+                        txt_response = self.handle_handshake(session_id, addr, raw_data)
+                    else:
+                        txt_response = self.handle_data_phase(session_id, seq_num, raw_data)
+
+                    if txt_response:
+                        rep.add_answer(RR(rname=req.q.qname, rtype=QTYPE.TXT, ttl=0, rdata=TXT(txt_response)))
+
+                self.sock.sendto(rep.pack(), addr)
+
+            except KeyboardInterrupt:
+                print("\n* Shutting down server safely...")
+                for sess_id in list(self.active_sessions.keys()):
+                    self._cleanup_session(sess_id)
+                self.sock.close()
+                break
+            except Exception as e:
+                print(f"- Server loop error: {e}")
+
+if __name__ == "__main__":
+    server = Server()
+    server.run()
