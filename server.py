@@ -22,7 +22,7 @@ class Server:
         self.active_sessions = {}
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
         self.sock.bind((self.udp_ip, self.udp_port))
-        print(f"* DNS Server listening on {self.udp_ip}:{self.udp_port} for {self.domain}...")
+        print(f"* DNS Server listening on port {self.udp_port} for {self.domain}...")
 
     def get_file_metadata(self, filepath: str):
             if not os.path.exists(filepath):
@@ -99,36 +99,46 @@ class Server:
         except Exception as e:
             print(f"- Integrity failed for session {session_id}: {e}")
             return b""
+        
+        resp_packet= None
 
         #Sending Metadata
         if seq_num == 1:
-            filename = packet.data.decode('utf-8')
-            session["filename"] = filename
+            raw_filename = packet.data.decode('utf-8')
+
+            safe_filename = os.path.basename(raw_filename)
+            base_dir = os.path.dirname(os.path.abspath(__file__))
+            filepath = os.path.join(base_dir, safe_filename)
+
+            session["filename"] = filepath
 
             if packet.has_flag(Packet.UPL):
                 session["action"] = "upload"
-                session["file_handle"] = open(filename, "wb")
-                print(f"* Session {session_id} initiated UPLOAD for: {filename}")
-                
+                session["file_handle"] = open(filepath, "wb")
+                print(f"* Session {session_id} initiated UPLOAD for: {safe_filename}")
                 resp_packet = Packet(session_id=session_id, ack_num=seq_num, flags=Packet.ACK)
 
             elif packet.has_flag(Packet.DWN):
                 session["action"] = "download"
-                print(f"* Session {session_id} requested DOWNLOAD for: {filename}")
-                
-                total_chunks, raw_hash = self.get_file_metadata(filename)
+                print(f"* Session {session_id} requested DOWNLOAD for: {safe_filename}")
+
+                total_chunks, raw_hash = self.get_file_metadata(filepath)
                 if total_chunks == 0:
-                    print(f"- Client requested non-existent file: {filename}")
+                    print(f"- Client requested non-existent file: {filepath}")
                     resp_packet = Packet(session_id=session_id, ack_num=seq_num, flags=Packet.FIN)
                 else:
                     session["total_chunks"] = total_chunks
-                    session["file_handle"] = open(filename, "rb")
-                    
+                    session["file_handle"] = open(filepath, "rb")
+
                     import struct
                     meta_payload = struct.pack(">I32s", total_chunks, raw_hash)
-                    
+
                     resp_packet = Packet(session_id=session_id, ack_num=seq_num, flags=Packet.ACK | Packet.DAT, data=meta_payload)
                     print(f"+ Packed Metadata: {total_chunks} chunks + 32-byte raw hash.")
+
+            else:
+                print(f"- Protocol Violation: Client sent seq_num 1 without UPL or DWN flag!")
+                resp_packet = Packet(session_id=session_id, ack_num=seq_num, flags=Packet.FIN)
 
         # Sending Chunks
         else:
@@ -170,6 +180,7 @@ class Server:
                 try:
                     req = DNSRecord.parse(data)
                 except Exception as e:
+                    print(f"- DEBUG Dropped garbage packet from {addr}: {e}")
                     continue
 
                 qname = str(req.q.qname).lower().rstrip('.')
@@ -180,23 +191,26 @@ class Server:
                 elif qname == self.authoritative:
                     parts = ""
                 else:
+                    print(f"- DEBUG Dropped packet. {qname} does not match {self.domain}")
                     continue
+                
+                print(f"Received requets {qname} of type {qtype} from {addr}")
 
                 rep = req.reply()
                 
-                if qtype== "NS" and qname== domain:
-                    rep.add_answer(RR(rname= qname, rtype= QTYPE.NS, ttl= 300, rdata= NS(authorative)))
-                    rep.add_ar(RR(rname= authorative+ '.', rtype= QTYPE.A, ttl= 300, rdata= A(ipv4)))
+                if qtype== "NS" and qname== self.domain:
+                    rep.add_answer(RR(rname= qname, rtype= QTYPE.NS, ttl= 300, rdata= NS(self.authorative)))
+                    rep.add_ar(RR(rname= self.authorative+ '.', rtype= QTYPE.A, ttl= 300, rdata= A(self.ipv4)))
 
-                elif qtype== "A" and qname== authorative:
-                    rep.add_answer(RR(rname= qname, rtype= QTYPE.A, ttl= 300, rdata= A(ipv4)))
+                elif qtype== "A" and qname== self.authorative:
+                    rep.add_answer(RR(rname= qname, rtype= QTYPE.A, ttl= 300, rdata= A(self.ipv4)))
 
-                elif qtype== "SOA" and qname== domain:
+                elif qtype== "SOA" and qname== self.domain:
                     dyn_serial= int(time.time())
                     rep.add_answer(RR(rname= qname, rtype= QTYPE.SOA, ttl= 300, 
                                     rdata= SOA(
-                                        mname= authorative, 
-                                        rname= "admin."+ domain,
+                                        mname= self.authorative, 
+                                        rname= "admin."+ self.domain,
                                         times= (
                                             dyn_serial, # Serial number
                                             3600,       # Refresh
@@ -206,25 +220,33 @@ class Server:
                                         )
                                     )))
                 
-                elif qtype == "TXT" and parts:
-                    labels = parts.split('.')
-                    if len(labels) < 3:
+                elif qtype== "TXT" and parts:
+                    labels= parts.split('.')
+                    if len(labels)< 3:
                         continue
                     
                     try:
-                        session_id = int(labels[-1])
-                        seq_num = int(labels[-2])
-                        raw_data = decode_qname("".join(labels[:-2]))
+                        session_id= int(labels[-1])
+                        seq_num= int(labels[-2])
+                        raw_data= decode_qname("".join(labels[:-2]))
                     except Exception:
+                        print(f"- DEBUG Failed to decode Base32 QNAME: {e}")
                         continue
 
-                    if seq_num == 0:
-                        txt_response = self.handle_handshake(session_id, addr, raw_data)
+                    if seq_num== 0:
+                        txt_response= self.handle_handshake(session_id, addr, raw_data)
                     else:
-                        txt_response = self.handle_data_phase(session_id, seq_num, raw_data)
-
+                        txt_response= self.handle_data_phase(session_id, seq_num, raw_data)
                     if txt_response:
-                        rep.add_answer(RR(rname=req.q.qname, rtype=QTYPE.TXT, ttl=0, rdata=TXT(txt_response)))
+                        if len(txt_response)> 255:
+                                txt_parts= [txt_response[i: i+ 255] for i in range(0, len(txt_response), 255)]
+                        else:
+                            txt_parts= [txt_response]
+                        
+                        rep.add_answer(RR(rname= req.q.qname, rtype= QTYPE.TXT, ttl=0, rdata= TXT(txt_parts)))
+
+                    else:
+                        print(f"- DEBUG txt_response was empty for seq_num {seq_num}")
 
                 self.sock.sendto(rep.pack(), addr)
 
