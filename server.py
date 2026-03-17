@@ -20,12 +20,20 @@ class Server:
         self.udp_ip = os.getenv('UDP_IP')
         self.ipv4 = os.getenv('IPV4')
         self.password = os.getenv('PASSWORD')
-        self.active_sessions = self.load_sessions()
         self.session_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), "sessions.json")
         self.upload_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "uploads")
-        if os.path.exists(self.upload_dir):
-            shutil.rmtree(self.upload_dir)
-        os.makedirs(self.upload_dir)
+
+        has_active_sessions = False
+        if os.path.exists(self.session_file) and os.path.getsize(self.session_file) > 2:
+            has_active_sessions = True
+
+        if not has_active_sessions:
+            if os.path.exists(self.upload_dir):
+                shutil.rmtree(self.upload_dir)
+        if not os.path.exists(self.upload_dir):
+            os.makedirs(self.upload_dir)
+
+        self.active_sessions = self.load_sessions()
 
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
         self.sock.bind((self.udp_ip, self.udp_port))
