@@ -9,7 +9,7 @@ import struct
 from dotenv import load_dotenv
 from dnslib import *
 from transport import Packet, Fragmenter
-from crypto_utils import HandshakeManager, Channel, decode_qname, encode_txt
+from crypto_utils import HandshakeManager, Channel, decode_qname, encode_txt, decode_txt
 
 class Server:
     def __init__(self):
@@ -20,8 +20,8 @@ class Server:
         self.udp_ip = os.getenv('UDP_IP')
         self.ipv4 = os.getenv('IPV4')
         self.password = os.getenv('PASSWORD')
-        self.active_sessions = {}
-
+        self.active_sessions = self.load_sessions()
+        self.session_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), "sessions.json")
         self.upload_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "uploads")
         if os.path.exists(self.upload_dir):
             shutil.rmtree(self.upload_dir)
@@ -30,6 +30,62 @@ class Server:
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
         self.sock.bind((self.udp_ip, self.udp_port))
         print(f"* DNS Server listening on port {self.udp_port} for {self.domain}...")
+
+    def save_sessions(self):
+        safe_sessions= {}
+        for sess_id, data in self.active_sessions.items():
+            safe_data = {
+                "action": data.get("action"),
+                "filename": data.get("filename"),
+                "total_chunks": data.get("total_chunks"),
+                "last_written_seq": data.get("last_written_seq", 0)
+            }
+            if "key" in data:
+                safe_data["key"] = encode_txt(data["key"])
+            if "expected_hash" in data:
+                safe_data["expected_hash"] = encode_txt(data["expected_hash"])
+                
+            safe_sessions[str(sess_id)] = safe_data
+
+        with open(self.session_file, "w") as f:
+            json.dump(safe_sessions, f, indent=4)
+        print("* Sessions saved to disk.")
+
+    def load_sessions(self):
+        if not os.path.exists(self.session_file):
+            return {}
+            
+        with open(self.session_file, "r") as f:
+            try:
+                safe_sessions = json.load(f)
+            except json.JSONDecodeError:
+                return {}
+
+        restored_sessions = {}
+        for str_sess_id, data in safe_sessions.items():
+            sess_id = int(str_sess_id)
+            restored_data = {
+                "action": data.get("action"),
+                "filename": data.get("filename"),
+                "total_chunks": data.get("total_chunks"),
+                "last_written_seq": data.get("last_written_seq")
+            }
+            
+            if "key" in data:
+                restored_data["key"] = decode_txt(data["key"])
+            if "expected_hash" in data:
+                restored_data["expected_hash"] = decode_txt(data["expected_hash"])
+                
+            if data.get("filename") and os.path.exists(data["filename"]):
+                if data.get("action") == "upload":
+                    restored_data["file_handle"] = open(data["filename"], "ab")
+                elif data.get("action") == "download":
+                    restored_data["file_handle"] = open(data["filename"], "rb")
+                    
+            restored_sessions[sess_id] = restored_data
+            
+        print(f"* Restored {len(restored_sessions)} active sessions from disk.")
+        return restored_sessions
 
     def get_file_metadata(self, filepath: str):
             if not os.path.exists(filepath):
@@ -45,7 +101,7 @@ class Server:
                     
             return (total_chunks, sha256_hash.digest())
 
-    def _cleanup_session(self, session_id: int):
+    def cleanup_session(self, session_id: int):
         if session_id in self.active_sessions:
             file_handle = self.active_sessions[session_id].get("file_handle")
             if file_handle and not file_handle.closed:
@@ -109,7 +165,7 @@ class Server:
         
         resp_packet= None
 
-        #Sending Metadata
+        # Handling Metadata
         if seq_num == 1:
             if packet.has_flag(Packet.UPL):
                 if not (packet.has_flag(Packet.ACK) and packet.has_flag(Packet.DAT)):
@@ -170,7 +226,7 @@ class Server:
                 print(f"- Protocol Violation: Client sent seq_num 1 without UPL or DWN flag!")
                 resp_packet = Packet(session_id=session_id, ack_num=seq_num, flags=Packet.FIN)
 
-        # Sending Chunks
+        # Handling Chunks
         else:
             action = session.get("action")
             file_handle = session.get("file_handle")
@@ -253,7 +309,7 @@ class Server:
                         resp_packet = Packet(session_id=session_id, ack_num=seq_num, flags=Packet.FIN)
 
         if packet.has_flag(Packet.FIN):
-            self._cleanup_session(session_id)
+            self.cleanup_session(session_id)
 
         enc_resp = channel.encrypt_chunk(session_id, seq_num, resp_packet.pack())
         return encode_txt(enc_resp).encode('utf-8')
@@ -337,8 +393,11 @@ class Server:
 
             except KeyboardInterrupt:
                 print("\n* Shutting down server safely...")
-                for sess_id in list(self.active_sessions.keys()):
-                    self._cleanup_session(sess_id)
+                for sess_id, data in self.active_sessions.items():
+                    fh = data.get("file_handle")
+                    if fh and not fh.closed:
+                        fh.close()
+                self.save_sessions()
                 self.sock.close()
                 break
             except Exception as e:

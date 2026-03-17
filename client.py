@@ -19,6 +19,9 @@ class Client:
         self.session_id= int(time.time())% 10000
         self.hsm= HandshakeManager(self.password)
         self.channel= None
+        self.upload_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "uploads")
+        if not os.path.exists(self.upload_dir):
+            os.makedirs(self.upload_dir)
 
     def get_file_metadata(self, filepath: str):
             if not os.path.exists(filepath):
@@ -105,8 +108,12 @@ class Client:
             return False  
 
     def download(self, filename: str):
+        safe_filename= os.path.basename(filename)
+        base_dir = os.path.dirname(os.path.abspath(__file__))
+        fpath = os.path.join(base_dir, safe_filename)
+
         seq_num= 1
-        first_packet= Packet(session_id= self.session_id, ack_num= seq_num, flags= Packet.ACK| Packet.DAT| Packet.DWN, data= filename.encode('utf-8'))
+        first_packet= Packet(session_id= self.session_id, ack_num= seq_num, flags= Packet.ACK| Packet.DAT| Packet.DWN, data= fpath.encode('utf-8'))
         first_bytes= first_packet.pack()
         data= encode_qname(self.channel.encrypt_chunk(session_id= self.session_id, seq_num= seq_num, plain_chunk= first_bytes))
         first_qname= self.create_qname(seq_num= seq_num, data= data)
@@ -137,12 +144,16 @@ class Client:
             return False
         expected_hash= expected_hash.hex()
         print(f"+ Server confirmed: {total_chunks} chunks. Expected Hash: {expected_hash[:10]}...")
-        Fragmenter.init_empty("result.txt")
+        
+        base_name, ext= os.path.splitext(safe_filename)
+        unique_filename= f"{base_name}_{self.session_id}{ext}"
+        filepath= os.path.join(self.upload_dir, unique_filename)
+        Fragmenter.init_empty(filepath)
 
         for i in range(1, total_chunks+ 1):
             max_retries= 3
             chunk_success= False
-            packet= Packet(session_id= self.session_id, ack_num= i+ 1, flags= Packet.ACK| Packet.DAT| Packet.DWN, data= filename.encode('utf-8'))
+            packet= Packet(session_id= self.session_id, ack_num= i+ 1, flags= Packet.ACK| Packet.DAT| Packet.DWN, data= fpath.encode('utf-8'))
             packet_bytes= packet.pack()
             data= encode_qname(self.channel.encrypt_chunk(session_id= self.session_id, seq_num= i+ 1, plain_chunk= packet_bytes))
             qname= self.create_qname(seq_num= i+ 1, data= data)
@@ -166,7 +177,7 @@ class Client:
                         continue
 
                     if chunk_packet.has_flag(Packet.DAT) and chunk_packet.data:
-                        Fragmenter.write_chunk("result.txt", chunk_packet.data)
+                        Fragmenter.write_chunk(filepath, chunk_packet.data)
                         print(f"+ Downloaded chunk {i}/{total_chunks}")
                         chunk_success = True
                         break
@@ -178,7 +189,7 @@ class Client:
                 return False
             
         print("* Verifying SHA-256 integrity")
-        hash_hex= calc_checksum("result.txt")
+        hash_hex= calc_checksum(filepath)
 
         if hash_hex== expected_hash:
             print(f"+ Integrity Passed!")
