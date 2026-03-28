@@ -181,98 +181,152 @@ class Server:
             print(f"- Protocol Violation: Packet missing routing flag (UPL/DWN/CMD)!")
             resp_packet = Packet(session_id=session_id, ack_num=seq_num, flags=Packet.FIN)
 
-        if resp_packet.has_flag(Packet.FIN):
-            self.cleanup_session(session_id)
+        if resp_packet == b"":
+            return b""
 
         enc_resp = channel.encrypt_chunk(session_id, seq_num, resp_packet.pack())
         return encode_txt(enc_resp).encode('utf-8')
+
 
     def process_upload(self, session: dict, session_id: int, seq_num: int, packet: Packet):
         SERVER_FLAG = Packet.DWN 
         
         if seq_num == 1:
             if not (packet.has_flag(Packet.ACK) and packet.has_flag(Packet.DAT)):
-                return Packet(session_id=session_id, ack_num=seq_num, flags=SERVER_FLAG | Packet.FIN)
+                print(f"- Protocol Violation: seq_num 1 UPL missing ACK or DAT flags!")
+                return b""
 
-            filename_bytes, metadata = packet.data[:-36], packet.data[-36:]
-            total_chunks, expected_hash = struct.unpack(">I32s", metadata)
-            safe_filename = os.path.basename(filename_bytes.decode('utf-8'))
-            
+            filename_bytes= packet.data[:-36]
+            metadata= packet.data[-36:]
+
+            raw_filename= filename_bytes.decode('utf-8')
+            total_chunks, expected_hash= struct.unpack(">I32s", metadata)
+
+            safe_filename = os.path.basename(raw_filename)
             base_name, ext = os.path.splitext(safe_filename)
             unique_filename = f"{base_name}_{session_id}{ext}"
             filepath = os.path.join(self.upload_dir, unique_filename)
 
-            session.update({
-                "filename": filepath, "action": "upload", 
-                "total_chunks": total_chunks, "expected_hash": expected_hash, "last_written_seq": 1
-            })
+            session["filename"]= filepath
+            session["action"] = "upload"
+            session["total_chunks"]= total_chunks
+            session["expected_hash"]= expected_hash
+            session["last_written_seq"]= 1
 
             Fragmenter.init_empty(filepath)
             session["file_handle"] = open(filepath, "wb")
+
             print(f"* Session {session_id} initiated UPLOAD for: {unique_filename}")
             return Packet(session_id=session_id, ack_num=seq_num, flags=Packet.ACK | SERVER_FLAG)
 
         else:
             file_handle = session.get("file_handle")
-            expected_seq = session.get("last_written_seq", 1) + 1
-
+            expected_seq= session.get("last_written_seq", 1)+ 1
             if packet.data and file_handle and not file_handle.closed:
-                if seq_num == expected_seq:
+                if seq_num== expected_seq:
                     file_handle.write(packet.data)
-                    session["last_written_seq"] = seq_num
-                elif seq_num > expected_seq:
-                    return Packet(session_id=session_id, ack_num=seq_num, flags=SERVER_FLAG | Packet.FIN)
-
-            if seq_num == session.get("total_chunks", -1) + 1:
-                if not packet.has_flag(Packet.FIN): return Packet(session_id=session_id, ack_num=seq_num, flags=SERVER_FLAG | Packet.FIN)
-                
-                if file_handle and not file_handle.closed: file_handle.close()
-                actual_hash = calc_checksum(session["filename"])
-                
-                if actual_hash == session["expected_hash"].hex():
-                    print(f"* Upload for {session['filename']} succeeded!")
-                    return Packet(session_id=session_id, ack_num=seq_num, flags=Packet.ACK | SERVER_FLAG | Packet.FIN)
+                    session["last_written_seq"]= seq_num
+                elif seq_num< expected_seq:
+                    print(f"- DEBUG: Ignored duplicate chunk {seq_num}. Client must have missed the ACK.")
                 else:
-                    print(f"* Upload failed!")
-                    return Packet(session_id=session_id, ack_num=seq_num, flags=SERVER_FLAG | Packet.FIN)
+                    print(f"- Protocol Violation: Received future chunk {seq_num} before expected {expected_seq}! Dropping.")
+                    return b""
 
-            return Packet(session_id=session_id, ack_num=seq_num, flags=Packet.ACK | SERVER_FLAG)
+            if seq_num== session.get("total_chunks", -1)+ 1:
+                if not packet.has_flag(Packet.FIN):
+                    print(f"- Protocol Violation: Final upload chunk {seq_num} is missing the FIN flag! Dropping.")
+                    return b""
+
+                action_filename= session["filename"]
+                expected_hash= session["expected_hash"]
+
+                print(f"* Received final chunk for file {action_filename}. Verifying integrity...")
+                if file_handle and not file_handle.closed:
+                    file_handle.close()
+
+                sha_hash= hashlib.sha256()
+                try:
+                    with open(action_filename, "rb") as f:
+                        for byte_block in iter(lambda: f.read(4096), b""):
+                            sha_hash.update(byte_block)
+                    actual_hash = sha_hash.digest()
+                except Exception as e:
+                    print(f"- Integrity check failed (File Error): {e}")
+                    actual_hash = b""
+
+                print(f"- DEBUG actual_hash: {actual_hash}\nexpected_hash: {expected_hash}")
+                if actual_hash== expected_hash:
+                    print(f"* Upload for file {action_filename} succeded!")
+                    self.cleanup_session(session_id)
+                    return Packet(session_id=session_id, ack_num=seq_num, flags=Packet.ACK | Packet.FIN | SERVER_FLAG)
+                else:
+                    print(f"* Upload for file {action_filename} failed!")
+                    self.cleanup_session(session_id)
+                    return Packet(session_id=session_id, ack_num=seq_num, flags=Packet.FIN | SERVER_FLAG)
+
+            else:
+                if packet.has_flag(Packet.FIN):
+                    print(f"- Protocol Violation: Premature FIN flag on chunk {seq_num}! Dropping.")
+                    return b""
+
+                return Packet(session_id=session_id, ack_num=seq_num, flags=Packet.ACK | SERVER_FLAG)
+
 
     def process_download(self, session: dict, session_id: int, seq_num: int, packet: Packet):
         SERVER_FLAG = Packet.UPL 
 
-        if packet.has_flag(Packet.FIN) and packet.has_flag(Packet.ACK):
-            print(f"* Client verified download integrity and sent FIN.")
-            return Packet(session_id=session_id, ack_num=seq_num, flags=Packet.ACK | SERVER_FLAG | Packet.FIN)
-
         if seq_num == 1:
-            filepath = os.path.join(os.path.dirname(os.path.abspath(__file__)), os.path.basename(packet.data.decode('utf-8')))
+            if not (packet.has_flag(Packet.ACK) and packet.has_flag(Packet.DAT)):
+                print(f"- Protocol Violation: seq_num 1 DWN missing ACK or DAT flags!")
+                return b""
+
+            raw_filename = packet.data.decode('utf-8')
+            safe_filename = os.path.basename(raw_filename)
+            base_dir = os.path.dirname(os.path.abspath(__file__))
+            filepath = os.path.join(base_dir, safe_filename)
+
+            session["filename"]= filepath
+            session["action"] = "download"
+            print(f"* Session {session_id} requested DOWNLOAD for: {safe_filename}")
+
             total_chunks, raw_hash = self.get_file_metadata(filepath)
-            
             if total_chunks == 0:
-                return Packet(session_id=session_id, ack_num=seq_num, flags=SERVER_FLAG | Packet.FIN)
+                print(f"- Client requested non-existent file: {filepath}")
+                return Packet(session_id=session_id, ack_num=seq_num, flags=Packet.FIN | SERVER_FLAG)
+            else:
+                session["total_chunks"] = total_chunks
+                session["file_handle"] = open(filepath, "rb")
 
-            session.update({"filename": filepath, "action": "download", "total_chunks": total_chunks})
-            session["file_handle"] = open(filepath, "rb")
-
-            meta_payload = struct.pack(">I32s", total_chunks, raw_hash)
-            return Packet(session_id=session_id, ack_num=seq_num, flags=Packet.ACK | Packet.DAT | SERVER_FLAG, data=meta_payload)
+                meta_payload = struct.pack(">I32s", total_chunks, raw_hash)
+                print(f"+ Packed Metadata: {total_chunks} chunks + 32-byte raw hash.")
+                return Packet(session_id=session_id, ack_num=seq_num, flags=Packet.ACK | Packet.DAT | SERVER_FLAG, data=meta_payload)
 
         else:
-            file_handle = session.get("file_handle")
-            if file_handle:
-                file_handle.seek((seq_num - 2) * Fragmenter.DOWNSTREAM_SIZE)
-                file_data = file_handle.read(Fragmenter.DOWNSTREAM_SIZE)
-                
-                resp_flags = Packet.ACK | Packet.DAT | SERVER_FLAG
-                if seq_num == session.get("total_chunks", -1) + 1:
-                    resp_flags |= Packet.FIN
-                return Packet(session_id=session_id, ack_num=seq_num, flags=resp_flags, data=file_data)
-                
-            return Packet(session_id=session_id, ack_num=seq_num, flags=SERVER_FLAG | Packet.FIN)
+            if packet.has_flag(Packet.FIN) and packet.has_flag(Packet.ACK):
+                print(f"* Client verified download integrity and sent FIN.")
+                self.cleanup_session(session_id)
+                return Packet(session_id=session_id, ack_num=seq_num, flags=Packet.ACK | Packet.FIN | SERVER_FLAG)
+            else:
+                if not (packet.has_flag(Packet.ACK) and packet.has_flag(Packet.DAT) and packet.has_flag(Packet.DWN)):
+                    print(f"- Protocol Violation: Client requested chunk {seq_num} without required flag!")
+                    return b""
 
-    def process_command(self, session: dict, session_id: int, seq_num: int, packet: Packet) -> Packet:
+                file_handle = session.get("file_handle")
+                if file_handle:
+                    offset = (seq_num - 2) * Fragmenter.DOWNSTREAM_SIZE 
+                    file_handle.seek(offset)
+                    file_data = file_handle.read(Fragmenter.DOWNSTREAM_SIZE)
+                    
+                    resp_flags = Packet.ACK | Packet.DAT | SERVER_FLAG
 
+                    if seq_num == session.get("total_chunks", -1) + 1:
+                        resp_flags |= Packet.FIN
+                    
+                    return Packet(session_id=session_id, ack_num=seq_num, flags=resp_flags, data=file_data)
+                else:
+                    return Packet(session_id=session_id, ack_num=seq_num, flags=Packet.FIN | SERVER_FLAG)
+
+    def process_command(self, session: dict, session_id: int, seq_num: int, packet: Packet):
         pass
 
     def run(self):
