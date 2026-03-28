@@ -11,6 +11,8 @@ class Packet:
     DAT= 0x08   # Contains data
     DWN= 0x10   # Download
     UPL= 0x20   # Upload
+    CMD= 0x40   # Remote Command Execution
+    RPC= 0x80   # Rest of Previous Command
 
     def __init__(self, session_id: int, ack_num: int, flags: int, data: bytes= b''):
         self.session_id = session_id
@@ -43,6 +45,8 @@ class Packet:
         if self.has_flag(self.DAT): current_flags.append("DAT")
         if self.has_flag(self.DWN): current_flags.append("DWN")
         if self.has_flag(self.UPL): current_flags.append("UPL")
+        if self.has_flag(self.CMD): current_flags.append("CMD")
+        if self.has_flag(self.RPC): current_flags.append("RPC")
 
         return f"[Packet | SESS: {self.session_id} | ACK: {self.ack_num} | FLAGS: {'+'.join(current_flags)} | Payload: {len(self.data)} bytes]"
 

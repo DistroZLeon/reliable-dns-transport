@@ -107,196 +107,106 @@ class Client:
             print("- Session has not aknowledged the handshake!")
             return False  
 
+    def send_package(self, seq_num: int, flags: int, expected_resp_flag: int, data: bytes = b'', max_retries: int = 3):
+        packet = Packet(session_id=self.session_id, ack_num=seq_num, flags=flags, data=data)
+        encoded_payload = encode_qname(self.channel.encrypt_chunk(self.session_id, seq_num, packet.pack()))
+        qname = self.create_qname(seq_num, encoded_payload)
+
+        for attempt in range(max_retries):
+            response = self.send_req(qname)
+            if not response:
+                print(f"- Server timed out on seq {seq_num}. Retrying...")
+                continue
+
+            try:
+                dec_response = self.channel.decrypt_chunk(self.session_id, seq_num, response)
+                resp_packet = Packet.unpack(dec_response)
+            except Exception as e:
+                print(f"- Decryption failed on seq {seq_num}: {e}")
+                continue
+            if resp_packet.ack_num == seq_num and (resp_packet.has_flag(Packet.ACK) or resp_packet.has_flag(Packet.FIN)) and resp_packet.has_flag(expected_resp_flag):
+                return resp_packet
+            else:
+                print("- Protocol Violation: Server response missing ACK, expected response flag or wrong seq_num! Retrying...")
+
+        print(f"- FATAL: Max retries exceeded for seq {seq_num}. Aborting.")
+        return None
+
     def download(self, filename: str):
-        safe_filename= os.path.basename(filename)
-        base_dir = os.path.dirname(os.path.abspath(__file__))
-        fpath = os.path.join(base_dir, safe_filename)
+        safe_filename = os.path.basename(filename)
+        filepath = os.path.join(self.upload_dir, f"{os.path.splitext(safe_filename)[0]}_{self.session_id}{os.path.splitext(safe_filename)[1]}")
 
-        seq_num= 1
-        first_packet= Packet(session_id= self.session_id, ack_num= seq_num, flags= Packet.ACK| Packet.DAT| Packet.DWN, data= fpath.encode('utf-8'))
-        first_bytes= first_packet.pack()
-        data= encode_qname(self.channel.encrypt_chunk(session_id= self.session_id, seq_num= seq_num, plain_chunk= first_bytes))
-        first_qname= self.create_qname(seq_num= seq_num, data= data)
-        first_response= self.send_req(first_qname)
-
-        if not first_response:
-                print(f"- Server timed out on getting metadata for file {filename}.")
-                return False
+        resp = self.send_package(1, Packet.ACK | Packet.DAT | Packet.DWN, Packet.UPL,filename.encode('utf-8'))
+        if not resp: return False
         
-        try:
-            dec_response = self.channel.decrypt_chunk(self.session_id, seq_num, first_response)
-            first_packet = Packet.unpack(dec_response)
-        except Exception as e:
-            print(f"- Decryption or unpack failed: {e}")
-            return False
-
-        if first_packet.has_flag(Packet.FIN):
+        if resp.has_flag(Packet.FIN):
             print(f"- Server reported file not found: {filename}")
             return False
 
-        if not (first_packet.ack_num== 1 and first_packet.has_flag(Packet.ACK)):
-            print(f"- Protocol Violation: Server response missing ACK or wrong seq_num!")
-            return False
-        try:
-            total_chunks, expected_hash = struct.unpack(">I32s", first_packet.data)
-        except Exception as e:
-            print(f"- Failed to parse metadata payload: {e}")
-            return False
-        expected_hash= expected_hash.hex()
+        total_chunks, expected_hash_bytes = struct.unpack(">I32s", resp.data)
+        expected_hash = expected_hash_bytes.hex()
         print(f"+ Server confirmed: {total_chunks} chunks. Expected Hash: {expected_hash[:10]}...")
-        
-        base_name, ext= os.path.splitext(safe_filename)
-        unique_filename= f"{base_name}_{self.session_id}{ext}"
-        filepath= os.path.join(self.upload_dir, unique_filename)
         Fragmenter.init_empty(filepath)
 
-        for i in range(1, total_chunks+ 1):
-            max_retries= 3
-            chunk_success= False
-            packet= Packet(session_id= self.session_id, ack_num= i+ 1, flags= Packet.ACK| Packet.DAT| Packet.DWN, data= fpath.encode('utf-8'))
-            packet_bytes= packet.pack()
-            data= encode_qname(self.channel.encrypt_chunk(session_id= self.session_id, seq_num= i+ 1, plain_chunk= packet_bytes))
-            qname= self.create_qname(seq_num= i+ 1, data= data)
-            for attempt in range(max_retries):
-                response= self.send_req(qname)
+        for i in range(1, total_chunks + 1):
+            resp = self.send_package(i + 1, Packet.ACK | Packet.DAT | Packet.DWN, Packet.UPL)
+            if not resp: return False
 
-                if not response:
-                    print(f"- Server timed out on chunk {i}/{total_chunks}.")
-                    continue
-
-                try:
-                    dec_chunk_response = self.channel.decrypt_chunk(self.session_id, i+ 1, response)
-                    chunk_packet = Packet.unpack(dec_chunk_response)
-                except Exception as e:
-                    print(f"- Decryption failed on chunk {i}: {e}")
-                    continue
-
-                if chunk_packet.ack_num == i+ 1 and chunk_packet.has_flag(Packet.ACK):
-                    if i == total_chunks and not chunk_packet.has_flag(Packet.FIN):
-                        print(f"- Protocol Violation: Server response missing FIN flag on final chunk! Retrying...")
-                        continue
-
-                    if chunk_packet.has_flag(Packet.DAT) and chunk_packet.data:
-                        Fragmenter.write_chunk(filepath, chunk_packet.data)
-                        print(f"+ Downloaded chunk {i}/{total_chunks}")
-                        chunk_success = True
-                        break
-                else:
-                    print(f"- Protocol Violation: Server response missing ACK or wrong seq_num! Retrying...")
-            
-            if not chunk_success:
-                print(f"- FATAL: Max retries exceeded for chunk {i}. Aborting transfer.")
+            if i == total_chunks and not resp.has_flag(Packet.FIN):
+                print("- Protocol Violation: Server response missing FIN flag on final chunk!")
                 return False
             
-        print("* Verifying SHA-256 integrity")
-        hash_hex= calc_checksum(filepath)
+            if i != total_chunks and resp.has_flag(Packet.FIN):
+                print(f"- Server reported failure when sending chunk {i}!")
+                return False
 
-        if hash_hex== expected_hash:
-            print(f"+ Integrity Passed!")
-            fin_seq = total_chunks + 2
-            fin_packet = Packet(session_id=self.session_id, ack_num=fin_seq, flags=Packet.ACK | Packet.FIN)
-            fin_bytes = fin_packet.pack()
-            data = encode_qname(self.channel.encrypt_chunk(session_id=self.session_id, seq_num=fin_seq, plain_chunk=fin_bytes))
-            qname = self.create_qname(seq_num=fin_seq, data=data)
-            
-            self.send_req(qname)
+            if resp.has_flag(Packet.DAT) and resp.data:
+                Fragmenter.write_chunk(filepath, resp.data)
+                print(f"+ Downloaded chunk {i}/{total_chunks}")
+
+        print("* Verifying SHA-256 integrity...")
+        if calc_checksum(filepath) == expected_hash:
+            print("+ Integrity Passed!")
+            self.send_package(total_chunks + 2, Packet.ACK| Packet.FIN| Packet.DWN, Packet.UPL,max_retries=1)
             print("* Session closed cleanly.")
             return True
-        else:
-            print("- Integrity Failed!")
-            print(f"  Expected: {expected_hash}")
-            print(f"  Actual:   {hash_hex}")
-            return False
+            
+        print("- Integrity Failed!")
+        return False
 
     def upload(self, filename: str):
-        seq_num= 1
-
         safe_filename = os.path.basename(filename)
-        base_dir = os.path.dirname(os.path.abspath(__file__))
-        filepath = os.path.join(base_dir, safe_filename)
+        filepath = os.path.join(os.path.dirname(os.path.abspath(__file__)), safe_filename)
 
-        total_chunks, raw_hash= self.get_file_metadata(filepath)
-        if total_chunks== 0:
-            print(f"- Received as parameter non-existing file: {filepath}")
+        total_chunks, raw_hash = self.get_file_metadata(filepath)
+        if total_chunks == 0:
+            print(f"- File not found: {filepath}")
             return False
-        
-        meta_payload= struct.pack(">I32s", total_chunks, raw_hash)
 
-        first_packet= Packet(session_id= self.session_id, ack_num= seq_num, flags= Packet.ACK| Packet.DAT| Packet.UPL, data= safe_filename.encode('utf-8')+ meta_payload)
-        print(first_packet)
-        first_bytes= first_packet.pack()
-        data= encode_qname(self.channel.encrypt_chunk(session_id= self.session_id, seq_num= seq_num, plain_chunk= first_bytes))
-        first_qname= self.create_qname(seq_num= seq_num, data= data)
-        first_response= self.send_req(first_qname)
+        meta_payload = safe_filename.encode('utf-8') + struct.pack(">I32s", total_chunks, raw_hash)
+        resp = self.send_package(1, Packet.ACK | Packet.DAT | Packet.UPL, Packet.DWN, meta_payload)
+        if not resp: return False
 
-        if not first_response:
-                print(f"- Server timed out on getting metadata for file {filename}.")
+        for i in range(1, total_chunks + 1):
+            flags = Packet.ACK | Packet.DAT | Packet.UPL
+            if i == total_chunks: flags |= Packet.FIN
+            
+            chunk_data = Fragmenter.read_chunk(filepath, i, Fragmenter.UPSTREAM_SIZE)
+            resp = self.send_package(i + 1, flags, Packet.DWN, chunk_data)
+            if not resp: return False
+
+            if i == total_chunks and not resp.has_flag(Packet.FIN):
+                print("- Protocol Violation: Last Server response is missing FIN flag!")
                 return False
-        
-        try:
-            dec_response = self.channel.decrypt_chunk(self.session_id, seq_num, first_response)
-            first_packet = Packet.unpack(dec_response)
-        except Exception as e:
-            print(f"- Decryption or unpack failed: {e}")
-            return False
-        
-        if not (first_packet.ack_num== 1 and first_packet.has_flag(Packet.ACK)):
-            print(f"- Protocol Violation: Server response missing ACK or wrong seq_num!")
-            return False
-
-        print(first_packet)
-
-        for i in range(1, total_chunks+ 1):
-            max_retries= 3
-            chunk_success= False
-            current_flags = Packet.ACK | Packet.DAT | Packet.UPL
-            if i == total_chunks:
-                current_flags |= Packet.FIN
-            packet= Packet(
-                session_id= self.session_id, 
-                ack_num= i+ 1, 
-                flags= current_flags, 
-                data= Fragmenter.read_chunk(filepath= filepath, seq_num= i, chunk_size= Fragmenter.UPSTREAM_SIZE)
-            )
-            packet_bytes= packet.pack()
-            data= encode_qname(self.channel.encrypt_chunk(session_id= self.session_id, seq_num= i+ 1, plain_chunk= packet_bytes))
-            qname= self.create_qname(seq_num= i+ 1, data= data)
-            for attempt in range(max_retries):
-                response= self.send_req(qname)
-
-                if not response:
-                    print(f"- Server timed out on chunk {i}/{total_chunks}.")
-                    continue
-                
-
-                try:
-                    dec_chunk_response = self.channel.decrypt_chunk(self.session_id, i+ 1, response)
-                    chunk_packet = Packet.unpack(dec_chunk_response)
-                    print(chunk_packet)
-                except Exception as e:
-                    print(f"- Decryption failed on chunk {i}: {e}")
-                    continue
-
-                if chunk_packet.ack_num == i+ 1 and chunk_packet.has_flag(Packet.ACK):
-                    if chunk_packet.ack_num== total_chunks+ 1:
-                        if chunk_packet.has_flag(Packet.FIN):
-                            chunk_success = True
-                            print(f"* Upload for file {filepath} completed")
-                            break
-                        else:
-                            print(f"- Protocol Violation: Last Server response is missing FIN flag!")
-                            return False
-                    else:
-                        print(f"+ Uploaded chunk {i}/{total_chunks}")
-                        chunk_success = True
-                        break
-                else:
-                    print(f"- Protocol Violation: Server response missing ACK or wrong seq_num! Retrying...")
-                
-
-            if not chunk_success:
-                print(f"- FATAL: Max retries exceeded for chunk {i}. Aborting transfer.")
+            
+            if i != total_chunks and resp.has_flag(Packet.FIN):
+                print(f"- Server reported failure when receiving chunk {i}!")
                 return False
+
+            print(f"+ Uploaded chunk {i}/{total_chunks}")
+
+        print(f"* Upload for file {filepath} completed and verified by server.")
+        return True
 
 if __name__== "__main__":
     client= Client()
