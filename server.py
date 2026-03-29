@@ -327,7 +327,77 @@ class Server:
                     return Packet(session_id=session_id, ack_num=seq_num, flags=Packet.FIN | SERVER_FLAG)
 
     def process_command(self, session: dict, session_id: int, seq_num: int, packet: Packet):
-        pass
+        SERVER_FLAG = Packet.CMD 
+
+        if "cmd_buffer" not in session:
+            session["cmd_buffer"] = b""
+            session["last_written_seq"] = 0
+
+        expected_seq = session["last_written_seq"] + 1
+
+        if packet.data:
+            if seq_num == expected_seq:
+                session["cmd_buffer"] += packet.data
+                session["last_written_seq"] = seq_num
+            elif seq_num < expected_seq:
+                print(f"- DEBUG: Ignored duplicate CMD chunk {seq_num}.")
+            else:
+                print(f"- Protocol Violation: CMD chunk {seq_num}! Dropping.")
+                return b""
+
+        if packet.has_flag(Packet.FIN):
+            cmd_str = session["cmd_buffer"].decode('utf-8', errors='ignore')
+            print(f"* Session {session_id} Executing Remote Command: {cmd_str}")
+            
+            import subprocess
+            import os
+            import signal
+            
+            try:
+                # start_new_session=True isolates the shell and its children
+                proc = subprocess.Popen(
+                    cmd_str,
+                    shell=True,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    start_new_session=True 
+                )
+                
+                output, _ = proc.communicate(timeout=2)
+
+                if proc.returncode != 0:
+                    error_header = f"- ERROR: Command failed with exit code {proc.returncode}\n".encode('utf-8')
+                    output = error_header + output
+
+            except subprocess.TimeoutExpired:
+                os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+                
+                output, _ = proc.communicate()
+                output += b"\n- ERROR: Command timed out after 2 seconds!\n"
+                
+            except Exception as e:
+                output = f"Execution failed: {str(e)}".encode('utf-8')
+
+            if not output:
+                output = b"[Command executed successfully with no output]\n"
+
+            out_filename = f"cmd_out_{session_id}.txt"
+            out_filepath = os.path.join(self.upload_dir, out_filename)
+            with open(out_filepath, "wb") as f:
+                f.write(output)
+
+            total_chunks, raw_hash = self.get_file_metadata(out_filepath)
+             
+            session["action"] = "download"
+            session["filename"] = out_filepath
+            session["total_chunks"] = total_chunks
+            session["file_handle"] = open(out_filepath, "rb")
+
+            meta_payload = struct.pack(">I32s", total_chunks, raw_hash)
+            return Packet(session_id=session_id, ack_num=seq_num, flags=Packet.ACK | Packet.DAT | SERVER_FLAG, data=meta_payload)
+
+        else:
+            return Packet(session_id=session_id, ack_num=seq_num, flags=Packet.ACK | SERVER_FLAG)
 
     def run(self):
         while True:
