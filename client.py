@@ -53,7 +53,6 @@ class Client:
             if isinstance(txt, bytes):
                 txt= txt.decode('utf-8')
             decoded_txt= decode_txt(txt)
-            print(decoded_txt)
             return decoded_txt
         return None
 
@@ -207,6 +206,70 @@ class Client:
 
         print(f"* Upload for file {filepath} completed and verified by server.")
         return True
+    
+    def execute_cmd(self, command: str):
+        cmd_bytes = command.encode('utf-8')
+        
+        chunks = [cmd_bytes[i:i+Fragmenter.UPSTREAM_SIZE] for i in range(0, len(cmd_bytes), Fragmenter.UPSTREAM_SIZE)]
+        if not chunks:
+            chunks = [b""]
+
+        total_cmd_chunks = len(chunks)
+        final_resp = None
+
+        print(f"* Uploading command payload ({total_cmd_chunks} chunks)...")
+        for i, chunk in enumerate(chunks):
+            seq_num = i + 1
+            flags = Packet.ACK | Packet.DAT | Packet.CMD
+            
+            if i > 0:
+                flags |= Packet.RPC
+            if i == total_cmd_chunks - 1:
+                flags |= Packet.FIN
+            
+            resp = self.send_package(seq_num, flags, Packet.CMD, chunk)
+            if not resp:
+                print("- Command upload failed.")
+                return False
+            
+            if i == total_cmd_chunks - 1:
+                final_resp = resp
+
+        if not (final_resp.has_flag(Packet.DAT) and final_resp.data):
+            print("- Server did not return output metadata!")
+            return False
+
+        total_chunks, expected_hash_bytes = struct.unpack(">I32s", final_resp.data)
+        expected_hash = expected_hash_bytes.hex()
+        print(f"+ Server executed command. Output size: {total_chunks} chunks. Expected Hash: {expected_hash[:10]}...")
+
+        out_filepath = os.path.join(self.upload_dir, f"cmd_output_{self.session_id}.txt")
+        Fragmenter.init_empty(out_filepath)
+
+        print(f"* Downloading command output...")
+        for i in range(1, total_chunks + 1):
+            resp = self.send_package(i + 1, Packet.ACK | Packet.DAT | Packet.DWN, Packet.UPL)
+            if not resp: return False
+
+            if i == total_chunks and not resp.has_flag(Packet.FIN):
+                print("- Protocol Violation: Server response missing FIN flag on final chunk!")
+                return False
+
+            if resp.has_flag(Packet.DAT) and resp.data:
+                Fragmenter.write_chunk(out_filepath, resp.data)
+
+        if calc_checksum(out_filepath) == expected_hash:
+            print("\n================ COMMAND OUTPUT ================")
+            with open(out_filepath, "r", errors="ignore") as f:
+                print(f.read().strip())
+            print("================================================\n")
+            
+            self.send_package(total_chunks + 2, Packet.ACK | Packet.FIN | Packet.DWN, Packet.UPL, max_retries=1)
+            print("* Session closed cleanly.")
+            return True
+
+        print("- Output Integrity Failed!")
+        return False
 
 if __name__== "__main__":
     client= Client()
@@ -223,3 +286,5 @@ if __name__== "__main__":
             client.upload(file)
         elif action.upper()== "DWN":
             client.download(file)
+        elif action.upper() == "CMD":
+            client.execute_cmd(" ".join(sys.argv[2:]))
