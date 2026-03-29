@@ -15,6 +15,7 @@ from dnslib import *
 from transport import Packet, Fragmenter
 from crypto_utils import HandshakeManager, Channel, decode_qname, encode_txt, decode_txt, calc_checksum
 
+# Main Server handling DNS/UDP multiplexing and session state
 class Server:
     def __init__(self):
         load_dotenv()
@@ -27,6 +28,7 @@ class Server:
         self.session_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), "sessions.json")
         self.upload_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "uploads")
 
+        # Initialize or clean up the uploads directory based on previous state
         has_active_sessions = False
         if os.path.exists(self.session_file) and os.path.getsize(self.session_file) > 2:
             has_active_sessions = True
@@ -37,6 +39,7 @@ class Server:
         if not os.path.exists(self.upload_dir):
             os.makedirs(self.upload_dir)
 
+        # Network and Concurrency Setup
         self.active_sessions = self.load_sessions()
         self.session_lock= threading.Lock()
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
@@ -48,6 +51,7 @@ class Server:
 
         print(f"* DNS Server listening on port {self.udp_port} for {self.domain}...")
 
+    # Save active sessions in .json for restart
     def save_sessions(self):
         safe_sessions= {}
         for sess_id, data in self.active_sessions.items():
@@ -68,6 +72,7 @@ class Server:
             json.dump(safe_sessions, f, indent=4)
         print("* Sessions saved to disk.")
 
+    # Restore active session and related data from disk
     def load_sessions(self):
         if not os.path.exists(self.session_file):
             return {}
@@ -105,6 +110,7 @@ class Server:
         print(f"* Restored {len(restored_sessions)} active sessions from disk.")
         return restored_sessions
 
+    # Calculate chunks and SHA-256 for integrity verification
     def get_file_metadata(self, filepath: str):
             if not os.path.exists(filepath):
                 return (0, b"")
@@ -119,6 +125,7 @@ class Server:
                     
             return (total_chunks, sha256_hash.digest())
 
+    # # Free memory, close file handles, and delete temporary files
     def cleanup_session(self, session_id: int, is_abandoned: bool= False):
         if session_id in self.active_sessions:
             data= self.active_sessions[session_id]
@@ -138,6 +145,7 @@ class Server:
             del self.active_sessions[session_id]
             print(f"+ Closed Session {session_id}.")
 
+    # Teardown idle or abandoned sessions
     def garbage_collect(self):
         current_time = time.time()
         stale_sessions = []
@@ -150,6 +158,7 @@ class Server:
             print(f"- Garbage Collector: Session {sid} idle for >300s. Cleaning Up.")
             self.cleanup_session(sid, is_abandoned= True)
 
+    # Start the ECDH Key Exchange and provide AES-GCM Session Key
     def handle_handshake(self, session_id: int, addr: tuple, raw_data: bytes):
         print(f"# Initiating Handshake for session {session_id} from {addr}!")
         
@@ -198,6 +207,7 @@ class Server:
         print(f"+ Obtained Crypto Key for Session {session_id}!")
         return resp_payload
 
+    # Decrypt incoming chunks and route to correct handlers
     def handle_data_phase(self, session_id: int, seq_num: int, raw_data: bytes):
         session = self.active_sessions.get(session_id)
         if not session:
@@ -232,6 +242,7 @@ class Server:
         enc_resp = channel.encrypt_chunk(session_id, seq_num, resp_packet.pack())
         return encode_txt(enc_resp).encode('utf-8')
     
+    # Main DNS Parser. It also filters authorized traffic and extracts Base32 QNAMEs
     def handle_request(self, data, addr):
         try:
             try:
@@ -311,6 +322,7 @@ class Server:
         except Exception as e:
             print(f"- Worker Thread Error: {e}")
 
+    # Receive chunks from the client, write to disk, and verify SHA-256 hash
     def process_upload(self, session: dict, session_id: int, seq_num: int, packet: Packet):
         SERVER_FLAG = Packet.DWN 
         
@@ -397,7 +409,7 @@ class Server:
 
                 return Packet(session_id=session_id, ack_num=seq_num, flags=Packet.ACK | SERVER_FLAG)
 
-
+    # Stream requested local file to the client
     def process_download(self, session: dict, session_id: int, seq_num: int, packet: Packet):
         SERVER_FLAG = Packet.UPL 
 
@@ -456,6 +468,7 @@ class Server:
                     self.cleanup_session(session_id)
                     return Packet(session_id=session_id, ack_num=seq_num, flags=Packet.FIN | SERVER_FLAG)
 
+    # Buffer command string, execute via subprocess shell, and prepare STDOUT file
     def process_command(self, session: dict, session_id: int, seq_num: int, packet: Packet):
         SERVER_FLAG = Packet.CMD 
 
@@ -535,6 +548,7 @@ class Server:
         else:
             return Packet(session_id=session_id, ack_num=seq_num, flags=Packet.ACK | SERVER_FLAG)
 
+    # Main Server loop. It manages the Garbage Collector, it receives Packets and submits to thread pool
     def run(self):
         while True:
             try:

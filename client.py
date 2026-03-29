@@ -23,6 +23,7 @@ class Client:
         if not os.path.exists(self.upload_dir):
             os.makedirs(self.upload_dir)
 
+    # Calculate chunks and SHA-256 for integrity verification
     def get_file_metadata(self, filepath: str):
             if not os.path.exists(filepath):
                 return (0, b"")
@@ -37,6 +38,8 @@ class Client:
                     
             return (total_chunks, sha256_hash.digest())
 
+
+    # Craft and send raw UDP packets, made into DNS TXT Queries
     def send_req(self, qname: str):
         pck= IP(dst= self.dst_ip)/UDP(sport= RandShort(), dport= self.udp_port)/DNS(
             id=RandShort(), 
@@ -56,6 +59,7 @@ class Client:
             return decoded_txt
         return None
 
+    # Construct the payload wrapper
     def create_qname(self, seq_num: int, data: bytes):
         qname_array=[data[i: i+63] for i in range(0, len(data), 63)]
         qname_array. append(str(seq_num))
@@ -64,6 +68,8 @@ class Client:
         qname= ".".join(qname_array)
         return qname
 
+
+    # Start ECDH Key Exchange and obtain AES-GCM Session Key
     def handshake(self):
         client_pub= self.hsm.get_pub_bytes()
 
@@ -106,7 +112,9 @@ class Client:
             print("- Session has not aknowledged the handshake!")
             return False  
 
-    def send_package(self, seq_num: int, flags: int, expected_resp_flag: int, data: bytes = b'', max_retries: int = 3):
+
+    # Handles encryption, sending, receiving, and automatic retries
+    def send_package(self, seq_num: int, flags: int, expected_resp_flag: int, data: bytes = b'', max_retries: int = 6):
         packet = Packet(session_id=self.session_id, ack_num=seq_num, flags=flags, data=data)
         encoded_payload = encode_qname(self.channel.encrypt_chunk(self.session_id, seq_num, packet.pack()))
         qname = self.create_qname(seq_num, encoded_payload)
@@ -131,6 +139,7 @@ class Client:
         print(f"- FATAL: Max retries exceeded for seq {seq_num}. Aborting.")
         return None
 
+    # Request file from server and reconstruct it locally
     def download(self, filename: str):
         safe_filename = os.path.basename(filename)
         filepath = os.path.join(self.upload_dir, f"{os.path.splitext(safe_filename)[0]}_{self.session_id}{os.path.splitext(safe_filename)[1]}")
@@ -173,6 +182,7 @@ class Client:
         print("- Integrity Failed!")
         return False
 
+    # Post local file to the server
     def upload(self, filename: str):
         safe_filename = os.path.basename(filename)
         filepath = os.path.join(os.path.dirname(os.path.abspath(__file__)), safe_filename)
@@ -207,6 +217,7 @@ class Client:
         print(f"* Upload for file {filepath} completed and verified by server.")
         return True
     
+    #Send shell command, wait for execution, get STDOUT
     def execute_cmd(self, command: str):
         cmd_bytes = command.encode('utf-8')
         
@@ -266,9 +277,14 @@ class Client:
             
             self.send_package(total_chunks + 2, Packet.ACK | Packet.FIN | Packet.DWN, Packet.UPL, max_retries=1)
             print("* Session closed cleanly.")
+            if os.path.exists(out_filepath):
+                os.remove(out_filepath)
+                print("- Cleaned up local temporary command output.") 
             return True
 
         print("- Output Integrity Failed!")
+        if os.path.exists(out_filepath):
+            os.remove(out_filepath)
         return False
 
 if __name__== "__main__":
@@ -280,7 +296,14 @@ if __name__== "__main__":
     else:
         print("Not enough parameters!")
         exit(1)
+    
+    allowed_actions= ["UPL", "DWN", "CMD"]
 
+    # Fail before handshake
+    if action.upper() not in allowed_actions:
+        print(f"- Invalid action '{action}'. Allowed only UPL, DWN, or CMD.")
+        exit(1)
+    
     if client.handshake():
         if action.upper()== "UPL":
             client.upload(file)

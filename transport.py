@@ -2,6 +2,7 @@ import struct
 import os
 import math
 
+# Packet Structure related Functionalities
 class Packet:
 
     # Protocol Flags
@@ -50,6 +51,7 @@ class Packet:
 
         return f"[Packet | SESS: {self.session_id} | ACK: {self.ack_num} | FLAGS: {'+'.join(current_flags)} | Payload: {len(self.data)} bytes]"
 
+# Upstream& Downstrean Fragmentation Management
 class Fragmenter:
     UPSTREAM_SIZE= 110
     DOWNSTREAM_SIZE= 800

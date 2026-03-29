@@ -14,6 +14,7 @@ class WorkerPool:
         for _ in range(self.min_workers):
             self.add_worker()
 
+    # Create more Workers
     def add_worker(self):
         with self.lock:
             if self.active_workers< self.max_workers:
@@ -22,6 +23,7 @@ class WorkerPool:
                 self.active_workers+= 1
                 print(f"+ Scaled Up to {self.active_workers} workers automatically!")
 
+    # As long as the thread is not told to shut down, it will run
     def worker_loop(self):
         while True:
             try:
@@ -41,11 +43,13 @@ class WorkerPool:
                         print(f"Scaled Down to {self.active_workers} workers automatically!")
                         return
 
+    # Each request is added to the queue. If the queue overflows, new workers are added
     def submit(self, data, addr):
         self.queue.put((data, addr))
         if self.queue.qsize()> self.active_workers and self.active_workers< self.max_workers:
             self.add_worker()
 
+    # Method that tears down all threads
     def shutdown(self):
         for _ in range(self.active_workers):
             self.queue.put((None, None))
