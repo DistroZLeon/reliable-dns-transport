@@ -16,7 +16,7 @@ class Client:
         self.udp_port= int(os.getenv('UDP_PORT'))
         self.dst_ip= os.getenv('DST_IP')
         self.password= os.getenv('PASSWORD')
-        self.session_id= int(time.time())% 10000
+        self.session_id= int.from_bytes(os.urandom(4), byteorder= 'big')
         self.hsm= HandshakeManager(self.password)
         self.channel= None
         self.upload_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "uploads")

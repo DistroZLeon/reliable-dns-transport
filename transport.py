@@ -53,7 +53,7 @@ class Packet:
 
 # Upstream& Downstrean Fragmentation Management
 class Fragmenter:
-    UPSTREAM_SIZE= 110
+    UPSTREAM_SIZE= 100
     DOWNSTREAM_SIZE= 800
 
     @staticmethod
