@@ -82,8 +82,15 @@ class Client:
 
         server_response= self.send_req(qname)
 
+        server_response = None
+        for attempt in range(3):
+            server_response = self.send_req(qname)
+            if server_response:
+                break
+            print(f"- Handshake attempt {attempt + 1} timed out. Retrying...")
+
         if not server_response:
-            print("- Handshake timed out!")
+            print("- FATAL: Handshake timed out after 3 attempts!")
             return False
         
         if len(server_response)<74:
@@ -218,7 +225,7 @@ class Client:
         return True
     
     #Send shell command, wait for execution, get STDOUT
-    def execute_cmd(self, command: str):
+    def cmd(self, command: str):
         cmd_bytes = command.encode('utf-8')
         
         chunks = [cmd_bytes[i:i+Fragmenter.UPSTREAM_SIZE] for i in range(0, len(cmd_bytes), Fragmenter.UPSTREAM_SIZE)]
@@ -310,4 +317,4 @@ if __name__== "__main__":
         elif action.upper()== "DWN":
             client.download(file)
         elif action.upper() == "CMD":
-            client.execute_cmd(" ".join(sys.argv[2:]))
+            client.cmd(" ".join(sys.argv[2:]))
