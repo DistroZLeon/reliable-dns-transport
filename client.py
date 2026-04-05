@@ -11,6 +11,7 @@ from crypto_utils import HandshakeManager, Channel, decode_txt, encode_qname, ca
 class Client:
     def __init__(self):
         load_dotenv()
+        self.retries_count= 0
         self.domain= os.getenv('DOMAIN')
         self.authorative= os.getenv('AUTHORATIVE')
         self.udp_port= int(os.getenv('UDP_PORT'))
@@ -87,6 +88,7 @@ class Client:
             server_response = self.send_req(qname)
             if server_response:
                 break
+            self.retries_count+= 1
             print(f"- Handshake attempt {attempt + 1} timed out. Retrying...")
 
         if not server_response:
@@ -129,6 +131,7 @@ class Client:
         for attempt in range(max_retries):
             response = self.send_req(qname)
             if not response:
+                self.retries_count+= 1
                 print(f"- Server timed out on seq {seq_num}. Retrying...")
                 continue
 
@@ -141,6 +144,7 @@ class Client:
             if resp_packet.ack_num == seq_num and (resp_packet.has_flag(Packet.ACK) or resp_packet.has_flag(Packet.FIN)) and resp_packet.has_flag(expected_resp_flag):
                 return resp_packet
             else:
+                self.retries_count+= 1
                 print("- Protocol Violation: Server response missing ACK, expected response flag or wrong seq_num! Retrying...")
 
         print(f"- FATAL: Max retries exceeded for seq {seq_num}. Aborting.")

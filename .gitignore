@@ -147,6 +147,10 @@ venv.bak/
 uploads
 sessions.json
 result.txt
+benchmark_results.png
+bench_*.dat
+dl_tcp_*
+dl_dns_*
 
 # Spyder project settings
 .spyderproject
