@@ -13,6 +13,7 @@ class Client:
         self.authorative= os.getenv('AUTHORATIVE')
         self.udp_port= int(os.getenv('UDP_PORT'))
         self.dst_ip= os.getenv('DST_IP')
+        self.iface= os.getenv('IFACE')
         self.password= os.getenv('PASSWORD')
         self.session_id= int.from_bytes(os.urandom(4), byteorder= 'big')
         self.hsm= HandshakeManager(self.password)
@@ -46,7 +47,7 @@ class Client:
             qd= DNSQR(qname= qname, qtype= "TXT"),
             ar= DNSRROPT(rclass=4096)
         )
-        r= sr1(pck, verbose= 0, timeout= 3, iface= "wlp2s0")
+        r= sr1(pck, verbose= 0, timeout= 3, iface= self.iface)
         if r and r.haslayer(DNS) and r[DNS].ancount>0:
             txt= r[DNS].an.rdata
             if isinstance(txt, list):
