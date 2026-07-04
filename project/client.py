@@ -1,10 +1,7 @@
 import os
 from dotenv import load_dotenv
 from scapy.all import *
-import matplotlib
-import socket
 import hashlib
-import time
 from transport import Packet, Fragmenter
 from crypto_utils import HandshakeManager, Channel, decode_txt, encode_qname, calc_checksum
 
@@ -19,7 +16,8 @@ class Client:
         self.password= os.getenv('PASSWORD')
         self.session_id= int.from_bytes(os.urandom(4), byteorder= 'big')
         self.hsm= HandshakeManager(self.password)
-        self.channel= None
+        self.clientChannel= None
+        self.serverChannel= None
         self.upload_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "uploads")
         if not os.path.exists(self.upload_dir):
             os.makedirs(self.upload_dir)
@@ -113,9 +111,10 @@ class Client:
 
         if server_packet.has_flag(Packet.SYN) and server_packet.has_flag(Packet.ACK):
             server_pub= server_packet.data
-            session_key= self.hsm.obtain_session_key(server_pub)
-            self.channel= Channel(session_key= session_key)
-            print(f"* Handshake completed! AES Key {session_key}")
+            server_key, client_key= self.hsm.obtain_session_keys(server_pub)
+            self.serverChannel= Channel(session_key= server_key)
+            self.clientChannel= Channel(session_key= client_key)
+            print(f"* Handshake completed! AES Keys are: Server = {server_key} and Client = {client_key}")
             return True
         else:
             print("- Session has not aknowledged the handshake!")
@@ -125,7 +124,7 @@ class Client:
     # Handles encryption, sending, receiving, and automatic retries
     def send_package(self, seq_num: int, flags: int, expected_resp_flag: int, data: bytes = b'', max_retries: int = 6):
         packet = Packet(session_id=self.session_id, ack_num=seq_num, flags=flags, data=data)
-        encoded_payload = encode_qname(self.channel.encrypt_chunk(self.session_id, seq_num, packet.pack()))
+        encoded_payload = encode_qname(self.clientChannel.encrypt_chunk(self.session_id, seq_num, packet.pack()))
         qname = self.create_qname(seq_num, encoded_payload)
 
         for attempt in range(max_retries):
@@ -136,7 +135,7 @@ class Client:
                 continue
 
             try:
-                dec_response = self.channel.decrypt_chunk(self.session_id, seq_num, response)
+                dec_response = self.serverChannel.decrypt_chunk(self.session_id, seq_num, response)
                 resp_packet = Packet.unpack(dec_response)
             except Exception as e:
                 print(f"- Decryption failed on seq {seq_num}: {e}")

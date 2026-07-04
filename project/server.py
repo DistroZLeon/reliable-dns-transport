@@ -61,8 +61,9 @@ class Server:
                 "total_chunks": data.get("total_chunks"),
                 "last_written_seq": data.get("last_written_seq", 0)
             }
-            if "key" in data:
-                safe_data["key"] = encode_txt(data["key"])
+            if "client_key" in data and "server_key" in data:
+                safe_data["client_key"] = encode_txt(data["client_key"])
+                safe_data["server_key"] = encode_txt(data["server_key"])
             if "expected_hash" in data:
                 safe_data["expected_hash"] = encode_txt(data["expected_hash"])
                 
@@ -94,8 +95,9 @@ class Server:
                 "last_active": time.time()
             }
             
-            if "key" in data:
-                restored_data["key"] = decode_txt(data["key"])
+            if "client_key" in data and "server_key" in data:
+                restored_data["client_key"] = decode_txt(data["client_key"])
+                restored_data["server_key"] = decode_txt(data["server_key"])
             if "expected_hash" in data:
                 restored_data["expected_hash"] = decode_txt(data["expected_hash"])
                 
@@ -191,7 +193,7 @@ class Server:
         if not packet.has_flag(Packet.SYN):
             print(f"- Handshake missing SYN flag from {addr}!")
             return b""
-        session_key = hsm.obtain_session_key(packet.data)
+        server_key, client_key = hsm.obtain_session_keys(packet.data)
         server_pub = hsm.get_pub_bytes()
         server_packet = Packet(session_id=session_id, ack_num=0, flags=Packet.SYN | Packet.ACK, data=server_pub)
         server_bytes = server_packet.pack()
@@ -199,7 +201,8 @@ class Server:
         resp_payload = encode_txt(server_bytes + server_hmac).encode('utf-8')
 
         self.active_sessions[session_id] = {
-            "key": session_key,
+            "server_key": server_key,
+            "client_key": client_key,
             "last_active": time.time(),
             "handshake_resp": resp_payload
         }
@@ -215,10 +218,11 @@ class Server:
             return b""
 
         session["last_active"] = time.time()
-        channel = Channel(session["key"])
+        client_channel = Channel(session["client_key"])
+        server_channel = Channel(session["server_key"])
 
         try:
-            decrypted_data = channel.decrypt_chunk(session_id, seq_num, raw_data)
+            decrypted_data = client_channel.decrypt_chunk(session_id, seq_num, raw_data)
             packet = Packet.unpack(decrypted_data)
         except Exception as e:
             print(f"- Integrity failed for session {session_id}: {e}")
@@ -239,7 +243,7 @@ class Server:
         if resp_packet == b"":
             return b""
 
-        enc_resp = channel.encrypt_chunk(session_id, seq_num, resp_packet.pack())
+        enc_resp = server_channel.encrypt_chunk(session_id, seq_num, resp_packet.pack())
         return encode_txt(enc_resp).encode('utf-8')
     
     # Main DNS Parser. It also filters authorized traffic and extracts Base32 QNAMEs

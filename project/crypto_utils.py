@@ -61,18 +61,23 @@ class HandshakeManager:
         except InvalidSignature:
             return False
 
-    def obtain_session_key(self, peer_pub_bytes: bytes)-> bytes:
+    def obtain_session_keys(self, peer_pub_bytes: bytes)-> tuple[bytes, bytes]:
         peer_pub_key= ec.EllipticCurvePublicKey.from_encoded_point(
                 ec.SECP256R1(), peer_pub_bytes
             )
         shared= self.priv_key.exchange(ec.ECDH(), peer_pub_key)
 
-        return HKDF(
+        key_material= HKDF(
                 algorithm= hashes.SHA256(),
-                length= 32,
+                length= 64,
                 salt= None,
-                info= b'dns_tunnel_key'
+                info= b'session-encryption-keys'
             ).derive(shared)
+        
+        server_key= key_material[:32] 
+        client_key= key_material[32:]
+
+        return server_key, client_key
 
 class Channel:
     def __init__(self, session_key: bytes):
