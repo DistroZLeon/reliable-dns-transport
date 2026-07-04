@@ -1,0 +1,43 @@
+\section{Evaluarea Performanțelor și Rezultate}
+Rezultatele obținute în urma testării protocolului sunt prezentate în acest capitol. În analiză sunt evaluate eficiența transferului de date, capacitatea de evaziune și reziliența sistemului de control al fluxului în situații de rețea reale.
+
+\subsection{Metodologia de testare și mediul experimental}
+În testele de performanță s-au utilizat un client local și un server găzduit pe un Virtual Private Server (VPS) de la \textit{Digital Ocean}.
+Pentru testarea comparativă s-a folosit Docker Compose (prin comanda \texttt{docker compose up -d --build}), ce a instanțiat concomitent serverul DNS pentru tunelare (UDP, port 53) și un server TCP (port 9000) aplicat ca \textit{baseline}.
+
+Pentru menținerea veridicității experimentelor, datele de test au avut entropie maximă, fiind generate pseudoaleator (\texttt{os.urandom}). Astfel, sunt prevenite optimizările de compresie la nivel de rețea sau protocol. Dimensiunea fișierelor variază progresiv de la 5 KB la 1 MB. Performanța protocolului personalizat a fost comparată cu \textit{baseline}-ul TCP, ce are eficiență maximă teoretică la transferul pe canalul de comunicație.
+
+\subsection{Analiza traficului la nivel de pachet}
+S-a utilizat utilitarul Wireshark~\cite{wireshark} prin care traficul a fost capturat și analizat pentru a dovedi caracterul evaziv al comunicării. Întreaga comunicație este compusă din cereri și răspunsuri DNS standard de tip \texttt{TXT}. Datele sunt ofuscate prin codificarea \texttt{Base32/Base64} și securizate prin criptarea AES-GCM. 
+
+Pachetele în trafic \textit{upstream} ascund instrucțiunile directe în interiorul câmpului \texttt{QNAME}, pe când în trafic \textit{downstream} serverul exploatează extensia EDNS pentru a trimite răspunsuri TXT de peste 1200 bytes. Capturile de ecran aferente pot fi consultate în \textbf{\ref{anexa:wireshark}}.
+
+Conținutul comunicației rămâne neclar în lipsa PSK-ului. Deși entropia ridicată, folosirea înregistrărilor \texttt{TXT} și dimensiunea nefirească a răspunsurilor pot fi marcate ca anomalii de către instrumentele de analiză euristică și statistică, \textit{firewall}-urile DPI, ce verifică doar formatul protocolului, vor permite tranzitul. Structural, pachetele sunt conforme standardelor RFC, pe când criptarea AES-GCM asigură imposibilitatea decodificării neautorizate sau a interceptării active.
+
+Mai mult, Figura~\ref{fig:ws_list} confirmă ritmul de transmisie dictat de \textit{Stop-and-Wait ARQ}. Se observă alternanța dintre interogările scurte ale clientului și răspunsurile mari ale serverului (trafic \textit{downstream}), confirmând absența \textit{burst}-urilor de trafic.
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.9\textwidth]{ws_list.jpg}
+    \caption{Captură Wireshark: Alternanța pachetelor}
+    \label{fig:ws_list}
+\end{figure}
+
+\subsection{Analiza performanțelor și a rezilienței la rate limiting}
+Rezultatele testelor de viteză, latență și pierdere de pachete sunt prezentate în Figura~\ref{fig:benchmarks}. Graficele au fost generate folosind biblioteca \textit{Matplotlib}~\cite{matplotlib}. Analiza metricilor arată impactul constrângerilor DNS asupra eficienței tunelului:
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=\textwidth]{benchmark_results.jpg}
+    \caption{Latența, lățimea de bandă și reziliența la Rate Limiting a protocolului}
+    \label{fig:benchmarks}
+\end{figure}
+
+\begin{itemize}
+    \item \textbf{Latența:} Asimetria dintre \textit{Upload} și \textit{Download} prin DNS este observabilă. Discrepanța validează ipoteza inițială: constrângerile de maxim 255 bytes per \texttt{QNAME} limitează viteza de \textit{Upload}, pe când utilizarea extensiei EDNS în \texttt{TXT} permite un \textit{Download} mai rapid. \textit{Baseline}-ul TCP se remarcă prin terminarea transferurilor extrem de rapid bidirecțional.
+    
+    \item \textbf{Lățimea de bandă:} Graficul al doilea evidențiază un eveniment clasic protocoalelor cu \textit{Sliding Window}: lățimea de bandă pentru TCP este proporțională dimensiunii fișierului, exemplificând \textit{TCP Slow Start}. În contrast, \textit{Throughput}-ul pentru tunelul DNS rămâne aproape constant. Comportamentul acesta relevă eficiența metodei \textit{Stop-and-Wait ARQ}, ce acționează ca un \textit{traffic shaper}, fără a trimite pachetele în \textit{burst}-uri.
+    
+    \item \textbf{Reziliența la Rate Limiting și Packet Loss:} Pentru fișierele de dimensiuni mici, de până la 250 KB, retransmisiile sunt minime, între 0 și 10 pachete. Începând cu pragul de 500 KB pierderile cresc alarmant, aproximativ 100 de retransmisii pentru \textit{Upload} la fișierul de 750 KB. Această zonă marchează activarea filtrelor de \textit{RRL}, ce încep să respingă cererile anormal de frecvente. Se observă că TCP-ul, protocol stabil ce nu suferă de \textit{rate limiting}, nu prezintă vreo pierdere de pachete.
+\end{itemize}
+
+Deși multe pachete sunt pierdute din cauza mecanismelor de protecție ale rețelei, bucla de retransmisie a păstrat conexiunea activă. Integritatea tuturor fișierelor reconstruite a fost validată criptografic prin SHA-256, rezultat ce demonstrează robustețea sistemului de control al fluxului implementat și a protocolului la \textit{rate limiting}.

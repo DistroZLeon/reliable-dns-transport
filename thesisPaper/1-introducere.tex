@@ -1,0 +1,28 @@
+\section{Introducere}
+
+\subsection{Contextul actual}
+În contextul curent al securității cibernetice, zonele de protecție ale rețelelor private au devenit foarte restrictive. Folosirea pe scară extinsă a aplicațiilor avansate de tip Firewall, precum NGFW, și a sistemelor de detectare și protecție împotriva infiltrărilor neautorizate, asemenea IDS sau IPS, a dus la blocarea automată a majorității porturilor și protocoalelor de comunicație ce nu sunt esențiale. Cu toate acestea, există o excepție arhitecturală esențială, anume Domain Name System (DNS).
+
+Întrucât rezoluția numelor de domeniu reprezintă o componentă importantă pentru funcționarea internetului, traficul pe portul 53, adesea folosit de protocoalele UDP și TCP, este rar filtrat sau blocat în întregime. Din acest motiv, infrastructura DNS devine un vector de atac propice stabilirii canalelor ascunse. Astfel, prin încapsularea datelor arbitrare în interiorul cererilor și răspunsurilor DNS legitime, tehnică cunoscută sub numele de DNS Tunneling, comunicarea reușește să ocolească politicile stricte de securitate impuse de sistemele informatice. Deși inițial utilizată pentru evitarea portalurilor captive din cadrul rețelelor publice, tehnica a fost răspândită în cadrul exploatărilor de tip Command-and-Control și pentru exfiltrarea silențioasă a datelor din medii izolate. 
+
+\subsection{Obiectivele lucrării}
+Principalul scop al acestei lucrări de licență, încadrată în subdomeniul securității cibernetice și al rețelelor de calculatoare, este planificarea structurii, implementarea și evaluarea unui protocol de transport personalizat. Acesta garantează o comunicare bidirecțională fiabilă și sigură doar prin utilizarea QNAME-urilor și a înregistrărilor de tip TXT din DNS.
+
+Spre deosebire de aplicațiile tradiționale ce au la bază mecanisme de tip \textit{Sliding Window}, lucrarea prezintă o arhitectură adaptată să reziste la mecanismele moderne de apărare, mai ales la limitarea ratei de transfer dictată de furnizorii de servicii internet și resolverii publici. Obiectivele concrete includ:
+
+\begin{itemize}
+    \item \textbf{Dezvoltarea unui nivel de transport fiabil:} Proiectarea unui sistem de control al fluxului de tip Stop-and-Wait Automatic Repeat Request, care să gestioneze pierderile de pachete (de exemplu, \textit{ACK loss}) și să funcționeze pe post de formator implicit de trafic pentru evitarea declanșării protecțiilor anti-DDoS.
+    \item \textbf{Securizarea canalului de comunicație:} Implementarea unui sistem criptografic solid ce respectă triada CIA: Confidențialitate, Integritate și Disponibilitate. Se utilizează schimbul de chei Ephemeral Elliptic Curve Diffie-Hellman pentru obținerea cheii de criptare simetrică, AES-GCM pentru criptarea autentificată a datelor și HMAC bazat pe un secret pre-partajat pentru prevenirea atacurilor de tip Man-in-the-Middle.
+    \item \textbf{Implementarea funcționalităților de Command-and-Control:} Crearea unei arhitecturi de tip client-server multi-thread capabilă să susțină încărcarea și descărcarea fișierelor, dar și execuția într-un mediu securizat a comenzilor shell la distanță. 
+\end{itemize}
+
+\subsection{Structura tezei}
+Structura lucrării este:
+
+\textbf{Capitolul 2: Preliminarii} prezintă baza teoretică pe care protocolul este construit, extrapolând funcționarea canalelor ascunse prin DNS, constrângerile inerente acestora, dar și primitivele criptografice moderne utilizate. De asemenea, acest capitol include o analiză a soluțiilor actuale, evidențiindu-se necesitatea abordării propuse. 
+
+\textbf{Capitolul 3: Arhitectura și implementarea sistemului} detaliază principalul grad de inovație realizat în lucrare. Sunt reliefate designul modular al aplicației, matematica fragmentării datelor pentru trimiterea pachetelor, mașina de stări a procesului de \textit{handshake}, cât și logica mecanismului de Stop-and-Wait ARQ pentru tratarea erorilor ce pot apărea pe rețea.  
+
+\textbf{Capitolul 4: Evaluarea Performanțelor și Rezultate} descrie metoda de testare și analizează performanța protocolului într-un context real de rețea. Se interpretează rezultatele referitoare la asimetria lățimii de bandă și latenței, demonstrându-se totodată reziliența arhitecturii la limitările ratei de transfer. De asemenea, se realizează o analiză a pachetelor folosind \textit{Wireshark}.
+
+\textbf{Capitolul 5: Concluzii} rezumă rezultatele obținute, validează îndeplinirea obiectivelor propuse și discută posibilele direcții de dezvoltare și optimizarea ulterioară a protocolului.

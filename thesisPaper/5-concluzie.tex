@@ -1,0 +1,17 @@
+\section{Concluzii}
+
+\subsection{Realizarea lucrării}
+Lucrarea a avut ca scop proiectarea și implementarea unui protocol de transport personalizat fiabil peste infrastructura DNS. Arhitectura a fost construită strict pe baza înregistrărilor de tip \texttt{TXT} și a interogărilor \texttt{QNAME}, utilizând protocolul UDP, ce ocupă portul 53. Prin dezvoltarea unui mecanism de controlare al fluxului de tip \textit{Stop-and-Wait ARQ}, sistemul a rezolvat problema pierderii de pachete inerentă rețelelor instabile, fără stare a sesiunii, și a mitigat declanșarea excesivă a filtrelor de \textit{Rate Limiting}. De asemenea, canalul de comunicație a fost securizat printr-un proces de \textit{handshake} bazat pe ECDHE autentificat printr-un HMAC dependent de un PSK, urmat de criptarea autentificată AES-GCM a tuturor pachetelor în care sunt transmise date.
+
+\subsection{Rezultate și aplicații practice}
+Rezultatele obținute confirmă funcționalitatea protocolului în situații practice, demonstrând o reziliență ridicată în fața mecanismelor de apărare ale rețelei, chiar și în condiții de pierdere masivă de pachete. Deși viteza de transfer este foarte limitată, în special la transmiterea \textit{upstream}, din cauza constrângerilor dimensionale ale protocolului DNS, acceptarea acestui compromis a fost necesară pentru a asigura o conexiune stabilă pe tot parcursul comunicării.
+
+În practică, un astfel de sistem poate fi folosit ca \textit{fallback} pentru a administra la distanță echipamente ce se află în medii foarte stricte cu comunicarea externă. În cazurile în care porturile folosite de obicei pentru management (precum SSH sau RDP) sunt blocate de \textit{Firewall}-uri avansate, infrastructura DNS rămâne de cele mai multe ori unica modalitate de comunicație deschisă. Protocolul creat ar permite astfel executarea mentenanței de urgență sau recuperarea datelor din sistemele izolate. 
+
+\subsection{Direcții de dezvoltare ulterioară}
+Deși obiectivele inițiale au fost îndeplinite de implementarea instrumentului, există mai multe căi prin care protocolul poate fi îmbunătățit ulterior:
+\begin{itemize}
+    \item \textbf{Diminuarea entropiei informaționale:} Pentru micșorarea riscului de detecție din partea mecanismelor de tip NGFW, se poate adăuga un algoritm de (\textit{padding}) bazat pe dicționare. Intercalarea datelor codificate în \texttt{Base32} împreună cu șiruri de caractere ce aparțin limbajului natural ar reduce scorul entropic al etichetelor din domeniile generate. În plus, dacă s-ar adăuga un proces de dinamizare a dimensiunilor cererilor și răspunsurilor DNS, pericolul reprezentat de instrumentele pentru analiză euristică și statistică ar fi estompat.
+    \item \textbf{Optimizarea controlului de flux:} Mecanismul strict de \textit{Stop-and-Wait}, bazat pe o buclă cu maxim 6 încercări și un \textit{timeout} de 3s pentru fiecare retransmisie, poate fi înlocuit cu o abordare mai flexibilă, fondată pe \textit{Leaky Bucket}. Această opțiune ar permite modificarea dinamică a ratei de transmisie, perfecționând lățimea de bandă, mai ales la \textit{download}, fără a trece pragurile de detecție ale filtrelor RRL.
+    \item \textbf{Rotația domeniilor (\textit{Domain Flipping}):} Obținerea mai multor domenii autoritative (inclusiv a name serverelor aferente) și alternarea lor în timpul sesiunilor de tunelare. Această funcționalitate poate contribui la prevenția blocării fluxului de transfer al protocolului prin adăugarea unui singur domeniu pe un \textit{blacklist}.
+\end{itemize}

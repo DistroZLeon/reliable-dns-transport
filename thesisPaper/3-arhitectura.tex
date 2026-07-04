@@ -1,0 +1,239 @@
+\section{Arhitectura și implementarea sistemului}
+Capitolul conturează arhitectura tehnică a protocolului. Pentru a echilibra compromisurile observate în instrumentele existente, acesta elimină necesitatea utilizării standardelor de nivel înalt, precum TCP over DNS. Sistemul este proiectat să includă securitatea nativ, combinând criptografia pe curbe eliptice și cea autentificată cu un mecanism strict de control al fluxului. Astfel, controlul congestiei este transformat într-un modelator de trafic ce îngreunează detecția volumetrică și asigură rezistența sesiunii în fața pierderii pachetelor cauzate de procesul de \textit{Rate Limiting} impus de resolverii publici. 
+
+\subsection{Arhitectura generală}
+Sistemul operează asincron, urmând modelul de rețea de tip client-server, și încapsulează traficul bidirecțional doar în înregistrări DNS TXT. Modularizarea arhitecturii facilitează testarea, securitatea și mentenanța, respectându-se principiul separării responsabilităților (Tabelul~\ref{tab:module_arhitectura}).
+
+\begin{table}[htbp]
+    \centering
+    \small
+    \renewcommand{\arraystretch}{1.1}
+    \begin{tabular}{|l|>{\raggedright\arraybackslash}p{11.5cm}|}
+        \hline
+        \textbf{Modul} & \textbf{Responsabilitate Principală} \\
+        \hline
+        \texttt{server.py} & Gestionează \textit{socket}-ul UDP (portul 53), multiplexează sesiunile și rutează pachetele decriptate către \textit{thread pool}. \\
+        \hline
+        \texttt{client.py} & Generează interogările DNS (Scapy), menține starea locală a sesiunii și execută sarcinile (Upload/Download/Comenzi). \\
+        \hline
+        \texttt{crypto\_utils} & Încapsulează operațiunile criptografice: generarea cheilor ECDHE, derivarea HKDF, criptarea AES-GCM și validarea HMAC. \\
+        \hline
+        \texttt{transport.py} & Oferă clasa \texttt{Packet} pentru serializarea/deserializarea binară a antetelor și gestionează fragmentarea fișierelor. \\
+        \hline
+        \texttt{worker\_pool} & Execută sarcinile concurent folosind redimensionare dinamică (scade/crește numărul de procese), prevenind blocarea serverului. \\
+        \hline
+    \end{tabular}
+    \caption{Structura modulară a sistemului de tunelare}
+    \label{tab:module_arhitectura}
+\end{table}
+
+\subsection{Structura pachetului}
+Întrucât UDP este inerent \textit{stateless} și există limite stricte de dimensiune dictate de DNS, a fost implementat un protocol la nivel de aplicație pentru realizarea comunicării. Orice mesaj transmis este serializat într-un format compus dintr-un antet de 9 bytes și un \textit{payload}.
+
+\subsubsection{Antetul protocolului}
+Antetul conține doar elementele esențiale pentru multiplexarea sesiunilor și controlarea fluxului. Structura pachetului este prezentată în Figura~\ref{fig:struct_pachet}.
+
+\begin{figure}[htbp]
+    \centering
+    \begin{minipage}{11cm}
+    \scriptsize
+\begin{verbatim}
+ 0                   1                   2                   3
+ 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
++-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+|                           Session ID                          |
++-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+|                        Sequence Number                        |
++-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+|     Flags     |                                               |
++-+-+-+-+-+-+-+-+                                               |
+|                                                               |
+|                        Payload (Data) ...                     |
+|                                                               |
++-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+\end{verbatim}
+    \end{minipage}
+    \caption{Diagrama structurii antetului de pachet}
+    \label{fig:struct_pachet}
+\end{figure}
+
+\begin{itemize}
+    \item \textbf{Session ID (32 biți):} Identificator unic al sesiunii; Necesar în obținerea \textit{IV}-ului din criptarea \textit{AES-GCM}
+    \item \textbf{Sequence Number (32 biți):} Contorizează ordinea pachetelor (\texttt{seq\_num} la trimitere, \texttt{ack\_num} la recepție). Garantează unicitatea \textit{IV}-ului pentru fiecare criptare.
+    \item \textbf{Flags (8 biți):} Octet de stare pentru rutarea, tipul și operația pachetului.
+\end{itemize}
+
+\subsubsection{Mecanismul de Flag-uri}
+Controlul logic al sesiunii este gestionat de octetul de flag-uri. Clasa \texttt{Packet} folosește operatori la nivel de bit (\textit{bitwise}) pentru a combina multiple stări. Flag-urile sunt detaliate în Tabelul~\ref{tab:flags_protocol}.
+
+\begin{table}[htbp]
+    \centering
+    \small
+    \renewcommand{\arraystretch}{1.1}
+    \begin{tabular}{|c|c|c|>{\raggedright\arraybackslash}p{8.5cm}|}
+        \hline
+        \textbf{Bit} & \textbf{Hexazecimal} & \textbf{Flag} & \textbf{Descriere / Rol} \\
+        \hline
+        0 & \texttt{0x01} & \textbf{SYN} & Inițializarea sesiunii prin \textit{handshake}. \\
+        \hline
+        1 & \texttt{0x02} & \textbf{ACK} & Confirmarea recepției (\textit{Acknowledge}). \\
+        \hline
+        2 & \texttt{0x04} & \textbf{FIN} & Marcarea ultimului \textit{chunk} (final transmisie). \\
+        \hline
+        3 & \texttt{0x08} & \textbf{DAT} & Arată prezența datelor în \textit{payload}. \\
+        \hline
+        4 & \texttt{0x10} & \textbf{UPL} & Sesiune de tip \textit{Upload} (Client $\rightarrow$ Server). \\
+        \hline
+        5 & \texttt{0x20} & \textbf{DWN} & Sesiune de tip \textit{Download} (Server $\rightarrow$ Client). \\
+        \hline
+        6 & \texttt{0x40} & \textbf{CMD} & Sesiune de execuție comenzi (\textit{Command Execution}). \\
+        \hline
+        7 & \texttt{0x80} & \textbf{RPC} & Continuarea execuției unei comenzi precedente (\textit{Rest of Previous Command}). \\
+        \hline
+    \end{tabular}
+    \caption{Tabelul alocării flag-urilor pe 8 biți}
+    \label{tab:flags_protocol}
+\end{table}
+
+\subsubsection{Matematica fragmentării}
+Înainte de transmitere, pachetul serializat este criptat cu AES-GCM și i se adaugă o etichetă de 16 bytes. DNS impune limite stricte, deci dimensiunea datelor din \textit{payload} trebuie calculată cu rigoare în baza asimetriei codificărilor.
+\paragraph{Traficul Upstream (Codificare Base32)}
+Cererile către server sunt înglobate în \texttt{QNAME}. DNS restricționează lungimea unui domeniu la 255 de octeți, iar a unei etichete la cel mult 63 de octeți. Știind $L_{criptat}$ lungimea mesajului cifrat, dimensiunea textului codificat \texttt{Base32} este:
+$$ \text{Dimensiune}_{\text{Base32}} = \left\lceil \frac{L_{criptat} \times 8}{5} \right\rceil \text{ octeți} $$
+Astfel, variabila \texttt{UPSTREAM\_SIZE} a fost fixată la 100 bytes, fiindcă șirul final, concatenat cu domeniul de bază și limitatorii \texttt{"."}, nu trebuie să depășească 255 bytes.
+
+\paragraph{Trafic Downstream (Codificare Base64)}
+Răspunsurile dinspre server folosesc înregistrări \texttt{TXT}, în care un string \texttt{TXT} (de maxim 255 bytes) utilizează codare \texttt{Base64}. Astfel, dimensiunea textului codificat este:
+$$ \text{Dimensiune}_{\text{Base64}} = \left\lceil \frac{L_{criptat} \times 4}{3} \right\rceil \text{ octeți} $$
+Mai mult, DNS permite trimiterea unor liste de stringuri \texttt{TXT} într-o înregistrare \texttt{TXT}. Deci, variabila \texttt{DOWNSTREAM\_SIZE} este fixată la 800 de octeți, datorită extensiei EDNS ce permite trimiterea mai multor date, dar și pentru respectarea restricțiiei de 1232 bytes impusă de DNS Flag Day 2020 (dimensiunea pachetului final de $\approx$ 1100 bytes).
+
+\subsection{Securitatea și managementul sesiunilor}
+Implementarea fazei de \textit{handshake} și managementul sesiunilor sunt gestionate de principiul apărării în adâncime, ajustat la limitările dimensionale ale DNS-ului. 
+
+\subsubsection{Justificarea alegerilor criptografice}
+Schimbul de chei asimetric brut (precum ECDH) oferă confidențialitate, dar nu și integritate. Nu posedă mecanisme de autentificare a identității, deci este susceptibil la atacuri Man-in-the-Middle (MitM). Soluțiile clasice rezolvă problema utilizând semnături digitale asimetrice (RSA, ECDSA), abordarea fiind nepotrivită în contextul tunelării DNS. Semnătura RSA-2048 are 256 bytes, deci includerea semnăturii publice creează fragmentare mare din cauza depășirii limitei dimensionale a cererilor DNS.
+
+Din cauza restricțiilor mediului, s-au luat următoarele decizii de proiectare:
+\begin{itemize}
+    \item \textbf{ECDHE în detrimentul RSA:} S-a ales \textit{ECDHE} (pe curba eliptică SECP256R1) deoarece dispune de chei publice mici (pe 64 de octeți) și garantează \textit{PFS}.  Parametrii matematici ai curbei SECP256R1 sunt detaliați în \ref{anexa:cripto_ec}. Compromiterea cheii serverului nu permite decriptarea sesiunilor trecute, spre deosebire de transportul cheilor RSA.
+    \item \textbf{HMAC-SHA256 cu PSK în detrimentul Semnăturilor Digitale:} Pentru autentificarea mutuală se folosește un secret pre-partajat (\textit{PSK}) verificat prin HMAC. Mecanismul oferă integritate și autentificare simetrică, necesitând un spațiu suplimentar de 32 bytes, potrivit pentru constrângerile QNAME-ului.
+\end{itemize}
+
+\subsubsection{Fluxul de stabilire a sesiunii}
+Canalul sigur este stabilit printr-un \textit{handshake} în trei pași, integrat în \textit{server.py} și \textit{client.py}.
+
+\begin{enumerate}
+    \item \textbf{Cererea de Sincronizare (Client $\rightarrow$ Server):} Clientul generează un \texttt{Session ID} întreg aleatoriu și o pereche de chei ECDHE. Cheia publică este împachetată împreună cu flag-ul \texttt{SYN}. Blocul este semnat cu \textit{HMAC-SHA256} utilizându-se PSK-ul local. Semnătura se concatenează payload-ului. Pachetul codificat în \texttt{Base32} este trimis ca subdomeniu DNS.
+    \item \textbf{Validarea și Răspunsul (Server $\rightarrow$ Client):} Serverul primește cererea și recalculează HMAC-ul folosind propriul PSK, iar dacă se potrivește, verifică unicitatea \texttt{Session ID}-ului, prevenind atacurile de \textit{Session Fixation}. Apoi, serverul își generează cheile efemere și calculează secretul comun. Obține cheia finală AES-GCM (pe 256 biți) procesând secretul ECDH prin HKDF. Acesta trimite cheia sa publică cu flag-urile \texttt{SYN | ACK}, protejate de un nou HMAC.  
+    \item \textbf{Confirmarea (Client):} Clientul primește răspunsul, confirmă identitatea serverului și își calculează cheia simetrică. Apoi, sesiunea trece în modul \texttt{ESTABLISHED}.
+\end{enumerate}
+
+\subsubsection{Mecanisme defensive și izolare}
+În faza de \textit{handshake}, procesarea restrictivă a pachetelor reprezintă baza apărării în adâncime. Dacă un pachet \texttt{SYN} are HMAC invalid sau un format greșit, serverul întoarce un răspuns TXT gol. Beneficiile acestei abordări sunt:
+\begin{itemize}
+    \item \textbf{Obfuscarea amprentei:} Fiindcă se returnează răspunsuri goale, serverul se comportă ca un DNS resolver legitim ce nu are înregistrările domeniului. Semnătura instrumentului de \textit{C2} rămâne neobservabilă la scanările active de rețea.
+    \item \textbf{Anularea factorului de amplificare:} Atacurile de \textit{DNS Amplification} se bazează pe servere care generează răspunsuri mai mari decât cererile primite. Deoarece cererile neautorizate primesc răspuns gol, serverul nu poate fi utilizat în atacuri \textit{DDoS}.
+    \item \textbf{Gestiunea duplicatelor UDP:} Fiindcă UDP este instabil, pachetele \texttt{SYN} pot ajunge duplicate la destinație. Dacă identifică o reinițializare a unei sesiuni active, nu regenerează cheile ECDHE, întoarce răspunsul din cache, prevenindu-se coruperea stării criptografice.
+\end{itemize}
+
+La finalizarea handshake-ului, cheile ECDHE sunt șterse, iar pachetele ulterioare sunt multiplexate doar pe baza \texttt{Session ID}-ului, fiind protejate de criptarea autentificată AES-GCM.
+
+\subsection{Controlul fluxului (Stop-and-Wait ARQ)}
+Deoarece UDP peste DNS este stateless, nu garantează livrarea pachetelor și este susceptibil la pierderea lor, protocolul implementează un sistem de control al fluxului. Acesta este bazat pe \textit{Stop-and-Wait ARQ}, complementat de validarea integrității prin SHA-256.
+
+\subsubsection{Justificarea modelatorului de trafic implicit}
+Protocoalele clasice de transfer utilizează \textit{Sliding Windows} pentru a trimite pachete în \textit{burst}-uri. Această abordare nu este potrivită în cazul tunelării DNS, fiindcă trimiterea concurentă a mai multor cereri către un resolver activează \textit{RRL-ul}, deci IP-ul sursă se blochează. 
+
+\textit{Stop-and-Wait ARQ} permite inerent existența unui singur pachet neconfirmat în rețea. Ritmul de transmisie depinde de timpul de răspuns al rețelei (\textit{Round-Trip Time} - RTT). Acest comportament reduce \textit{spike}-urile de interogări și acționează ca un modelator de trafic, frecvența fiind ținută sub nivelul de detecție al resolverelor.
+
+\subsubsection{Mecanismul de confirmare și retransmisie}
+Circuitul unui transfer de date este controlat de metoda \texttt{send\_package}, ce gestionează retransmisiile și verifică starea canalului conform regulilor protocolului:
+
+\begingroup
+\singlespacing
+\noindent\rule{\textwidth}{0.8pt}
+\vspace{-0.15cm}
+
+\noindent \textbf{Algoritmul 3.1} Logica Stop-and-Wait ARQ (pentru un chunk)
+\vspace{-0.15cm}
+
+\noindent\rule{\textwidth}{0.4pt}
+\vspace{0.1cm}
+
+\begin{algorithmic}[1]
+\Require $seq\_num$ (numărul secvenței), $flags$, $expected\_flag$, $data$
+\State $packet \gets \text{CripteazăȘiCodifică}(session\_id, seq\_num, flags, data)$
+\State $qname \gets \text{CreazăInterogareDNS}(packet)$
+\For{$attempt = 1$ \textbf{până la} $max\_retries$}
+    \State $response \gets \text{TrimiteCererea}(qname, \text{timeout} = 3s)$
+    \If{$response$ este Null}
+        \State \textbf{continue} \Comment{Timeout atins}
+    \EndIf
+    
+    \State $dec\_resp \gets \text{DecripteazăPachet}(response)$
+    \If{decriptarea eșuează}
+        \State \textbf{continue} \Comment{Integritate compromisă}
+    \EndIf
+    
+    \If{$dec\_resp.ack\_num == seq\_num$ \textbf{și} $dec\_resp.flags$ conține $expected\_flag$}
+        \State \textbf{return} $dec\_resp$ \Comment{Pachet conform formatului}
+    \EndIf
+\EndFor
+\State \textbf{return} \text{Eroare} \Comment{Transfer eșuat}
+\end{algorithmic}
+\vspace{-0.2cm}
+\noindent\rule{\textwidth}{0.8pt}
+\endgroup
+
+\begin{enumerate}
+    \item \textbf{Transmiterea și Blocarea:} Pentru fiecare \textit{chunk} citit de \texttt{Fragmenter}, clientul transmite pachetul format cu \texttt{seq\_num}. Acesta așteaptă răspunsul, cu un \textit{timeout} de 3s pe interogare.
+     \item \textbf{Validarea în Client:} La decriptarea răspunsului, pachetul este acceptat doar dacă \texttt{ack\_num} = \texttt{seq\_num} și conține flag-ul de confirmare (\texttt{ACK} sau \texttt{FIN}) și cel al operației așteptate (\texttt{expected\_resp\_flag}). Altfel, protocolul se consideră încălcat.
+    \item \textbf{Validarea în Server:} Pentru a opri atacurile de tip \textit{Replay} sau \textit{Reentry}, serverul reține secvența așteptată (\texttt{last\_written\_seq} + 1). La primirea unui pachet de date:
+    \begin{itemize}
+        \item \texttt{seq\_num == expected\_seq}: Datele sunt scrise, iar starea avansează.
+        \item \texttt{seq\_num < expected\_seq}: Pachet duplicat (\texttt{ACK} rătăcit pe rețea). Datele sunt ignorate pentru a preveni coruperea fișierului, dar serverul retrimite un \texttt{ACK}.
+        \item \texttt{seq\_num > expected\_seq}: Pachet viitor ce indică o eroare. Pachetul este aruncat.
+    \end{itemize}
+    \item \textbf{Retransmisia și limitarea erorilor:}
+    \begin{itemize}
+        \item Dacă clientul primește confirmarea corectă, trece la următorul \textit{chunk}.
+        \item Dacă \textit{timeout}-ul expiră, se primește o secvență greșită sau lipsesc flag-urile așteptate, se consideră ca fiind o pierdere. Pachetul se retransmite automat.
+        \item Pentru a nu se rula indefinit, protocolul dictează o limită de 6 retransmiteri. Depășirea acestei restricții declanșează o eroare \textit{FATAL}, iar transferul este anulat.
+    \end{itemize}
+\end{enumerate}
+
+\subsubsection{Validarea integrității globale}
+Pentru prevenirea coruperii datelor în timpul asamblării, înainte de începerea transferului se trimite un pachet de metadate, ce conține numărul total de fragmente și hash-ul SHA-256 al fișierului inițial.
+
+La finalul transferului, solicitantul calculează hash-ul fișierului asamblat și îl compară cu cel primit. Doar după validarea integrității se transmite pachetul \texttt{FIN} pentru încheierea sesiunii.
+
+\subsection{Arhitectura Client-Server}
+Sistemul este gândit să mențină execuția în paralel și să izoleze activitățile de rețea de cele de procesare a datelor. Logica operațională este repartizată între client și serverul de tunelare.
+
+\subsubsection{Concurența serverului}
+Pentru a împiedica \textit{bottleneck}-urile pe socket-ul UDP central, \texttt{server.py} funcționează ca un \textit{dispatcher}. După intercepția unui pachet valid, prelucrarea acestuia se delegă lui \texttt{WorkerPool}.
+
+Se utilizează un sistem de \textit{Thread Pool} cu redimensionare dinamică, extensia fiind făcută imediat, pe când micșorarea după un \textit{buffer} de inactivitate de 30s. Starea cozii de așteptare declanșează scalarea activă, thread-ul principal rămânând liber pentru recepția pachetelor.
+
+\subsubsection{Izolarea mediului, persistența și managementul memoriei}
+Reziliența, portabilitatea și securitatea infrastructurii sunt asigurate prin containerizarea serverului în Docker. Mecanismele interne de gestionare a stării sunt:
+
+\begin{itemize}
+    \item \textbf{Sandboxing și Recuperare Automată:} Serverul rulează într-un mediu izolat de sistemul de operare gazdă, atenuându-se riscul de compromitere al infrastructurii. Prin politica \texttt{restart: unless-stopped} din orchestrator, serverul își revine automat la apariția oricărei erori majore.
+    \item \textbf{Persistența sesiunilor:} Starea sesiunilor active este salvată în \texttt{sessions.json}. Prin \textit{Volume Binding}, fișierul de stare și directorul \texttt{uploads/} persistă pe gazdă. Când containerul este repornit, transferurile întrerupte pot continua datorită restaurării sesiunilor.
+    \item \textbf{Garbage Collector (GC):} O procedură rulează recurent pentru a găsi sesiunile inactive de mai mult de 300s. GC-ul forțează închiderea \textit{file handle}-urilor și ștergerea fișierelor temporare ce aparțin sesiunilor moarte, prevenind \textit{Resource Exhaustion}.
+\end{itemize}
+
+\subsubsection{Fluxurile operaționale}
+Clientul controlează operarea serverului prin flag-urile de protocol. Există trei funcții:
+
+\begin{itemize}
+    \item \textbf{Upload - \texttt{UPL}:}
+    Procesul este inițiat de client prin trimiterea unui pachet cu metadate. După \textit{Acknowledgement}, clientul transmite fragmentele prin \textit{Stop-and-Wait ARQ}. La final, serverul validează integritatea fișierului asamblat și îl salvează.
+
+    \item \textbf{Download - \texttt{DWN}:}
+    Clientul solicită un fișier de pe server. Dacă fișierul există, serverul răspunde cu metadatele corespunzătoare. Apoi, clientul face cereri DNS succesive pentru fiecare fragment, reconstruiește fișierul local și îi validează integritatea la final.
+
+    \item \textbf{Remote Command Execution - \texttt{CMD}:}
+    Comenzile destinate serverului sunt filtrate, cele malițioase (precum \texttt{rm -rf /}) fiind blocate. Cele permise sunt executate de server într-un sub-proces (\texttt{subprocess.Popen}) cu un \textit{timeout} de 1.5s pentru prevenția blocajelor. Ieșirea standard este salvată într-un fișier temporar, iar clientul se mută pe operația de DWN a rezultatului. La final, serverul declanșează \textit{cleanup}-ul fișierului temporar.
+\end{itemize}
