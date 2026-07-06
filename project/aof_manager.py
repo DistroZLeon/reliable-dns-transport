@@ -50,29 +50,28 @@ class AOFManager:
     def compaction(self):
         snapshot= {}
 
-        with self.lock:
-            for session_id, data in self.sessions.items():
-                client_blob, server_blob= self.obtain_client_server_blobs(session_id, data.get("client_key"), data.get("server_key")) 
+        for session_id, data in self.sessions.items():
+            client_blob, server_blob= self.obtain_client_server_blobs(session_id, data.get("client_key"), data.get("server_key")) 
+            snapshot[str(session_id)]={
+                "action": data.get("action"),
+                "filename": data.get("filename"),
+                "total_chunks": data.get("total_chunks"),
+                "last_written_seq": data.get("last_written_seq", 0),
+                "client_key": client_blob, 
+                "server_key": server_blob,
+                "expected_hash": encode_txt(data.get("expected_hash")) if data.get("expected_hash") else None
+            }
 
-                snapshot[str(session_id)]={
-                    "action": data.get("action"),
-                    "filename": data.get("filename"),
-                    "total_chunks": data.get("total_chunks"),
-                    "last_written_seq": data.get("last_written_seq", 0),
-                    "client_key": client_blob, 
-                    "server_key": server_blob,
-                    "expected_hash": encode_txt(data.get("expected_hash")) if data.get("expected_hash") else None
-                }
-
-            old_path= self.log_path+ "old"
-            if os.path.exists(self.log_path):
-                os.replace(self.log_path, old_path)
-
+        old_path= self.log_path+ ".old"
+        if os.path.exists(self.log_path):
+            os.replace(self.log_path, old_path)
             open(self.log_path, 'wb').close()
 
         tmp= self.snapshot_path+ '.tmp'
         with open(tmp, "w") as f:
             json.dump(snapshot, f)
+            f.flush()
+            os.dsync(f.fileno())
 
         os.replace(tmp, self.snapshot_path)
         if os.path.exists(old_path):
@@ -138,7 +137,7 @@ class AOFManager:
                     payload= f.read(payload_len)
                     data= json.loads(payload.decode('utf-8'))
 
-                    client_key, server_key= self.aof_manager.decrypt_client_server_blobs(session_id, data["client_key"], data["server_key"])
+                    client_key, server_key= self.decrypt_client_server_blobs(session_id, data["client_key"], data["server_key"])
                     data["client_key"]= client_key
                     data["server_key"]= server_key
                     data["last_active"]= time.time()

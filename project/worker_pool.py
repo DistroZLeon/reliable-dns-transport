@@ -1,4 +1,5 @@
 import queue
+import traceback
 import threading
 
 class WorkerPool:
@@ -32,9 +33,12 @@ class WorkerPool:
                     print("- Worker thread safely shut down.")
                     self.queue.task_done() 
                     break
-
-                self.target(data, addr)
-                self.queue.task_done()
+                try:
+                    self.target(data, addr)
+                except Exception as e:
+                    traceback.print_exec()
+                finally:
+                    self.queue.task_done()
 
             except queue.Empty:
                 with self.lock:
