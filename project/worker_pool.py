@@ -36,7 +36,7 @@ class WorkerPool:
                 try:
                     self.target(data, addr)
                 except Exception as e:
-                    traceback.print_exec()
+                    traceback.print_exc()
                 finally:
                     self.queue.task_done()
 

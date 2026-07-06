@@ -1,4 +1,5 @@
 import subprocess
+import traceback
 import os
 import signal
 import shutil
@@ -43,14 +44,15 @@ class Server:
         # Network and Concurrency Setup
         self.active_sessions= {}
         self.session_lock= threading.Lock()
+        self.aof_lock= threading.Lock()
 
         key_path= os.path.join(os.path.dirname(os.path.abspath(__file__)), "secrets", "session_master.key")
         with open(key_path, "rb") as f:
-            master_key = f.read()
-        self.aof_manager = AOFManager(self.active_sessions, self.session_lock, master_key)
+            master_key= f.read()
+        self.aof_manager= AOFManager(self.active_sessions, self.aof_lock, master_key)
 
         # Initialize or clean up the uploads directory based on previous state
-        has_active_sessions = (
+        has_active_sessions= (
             os.path.exists(self.aof_manager.snapshot_path) or os.path.exists(self.aof_manager.log_path)
         )
 
@@ -61,11 +63,12 @@ class Server:
             os.makedirs(self.upload_dir)
 
         self.load_sessions()
-        self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
+        self.sock= socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
         self.sock.bind((self.udp_ip, self.udp_port))
 
         self.sock.settimeout(1.0)
-        self.last_gc = time.time()
+        self.last_gc= time.time()
+        self.last_compaction= time.time()
         self.pool= WorkerPool(target= self.handle_request)
 
         print(f"* DNS Server listening on port {self.udp_port} for {self.domain}...")
@@ -82,6 +85,8 @@ class Server:
                         client_key, server_key= self.aof_manager.decrypt_client_server_blobs(sid, data["client_key"], data["server_key"])
                         data["client_key"]= client_key
                         data["server_key"]= server_key
+                        if data.get("expected_hash"):
+                            data["expected_hash"]= decode_txt(data["expected_hash"])
                         data["last_active"]= time.time()
                         
                         if data.get("filename") and os.path.exists(data["filename"]):
@@ -289,7 +294,6 @@ class Server:
                 except Exception as e:
                     print(f"- DEBUG Failed to decode Base32 QNAME: {e}")
                     return
-                
                 with self.session_lock:
                     if seq_num== 0:
                         txt_response= self.handle_handshake(session_id, addr, raw_data)
@@ -343,7 +347,6 @@ class Server:
             session["file_handle"] = open(filepath, "wb")
 
             self.aof_manager.create(session_id= session_id, session= session)
-
             print(f"* Session {session_id} initiated UPLOAD for: {unique_filename}")
             return Packet(session_id=session_id, ack_num=seq_num, flags=Packet.ACK | SERVER_FLAG)
 
@@ -434,7 +437,6 @@ class Server:
                 session["file_handle"] = open(filepath, "rb")
 
                 self.aof_manager.create(session_id= session_id, session= session)
-
                 meta_payload = struct.pack(">I32s", total_chunks, raw_hash)
                 print(f"+ Packed Metadata: {total_chunks} chunks + 32-byte raw hash.")
                 return Packet(session_id=session_id, ack_num=seq_num, flags=Packet.ACK | Packet.DAT | SERVER_FLAG, data=meta_payload)
@@ -544,7 +546,7 @@ class Server:
             session["file_handle"] = open(out_filepath, "rb")
 
             self.aof_manager.create(session_id= session_id, session= session)
-
+            
             meta_payload = struct.pack(">I32s", total_chunks, raw_hash)
             return Packet(session_id=session_id, ack_num=seq_num, flags=Packet.ACK | Packet.DAT | SERVER_FLAG, data=meta_payload)
 
@@ -584,8 +586,8 @@ class Server:
 
                 self.sock.close()
                 break
-            except Exception as e:
-                print(f"- Server loop error: {e}")
+            except Exception:
+                traceback.print_exc()
 
 if __name__ == "__main__":
     server = Server()
