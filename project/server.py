@@ -40,6 +40,15 @@ class Server:
         self.session_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), "sessions.json")
         self.upload_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "uploads")
 
+        # Network and Concurrency Setup
+        self.active_sessions= {}
+        self.session_lock= threading.Lock()
+
+        key_path= os.path.join(os.path.dirname(os.path.abspath(__file__)), "secrets", "session_master.key")
+        with open(key_path, "rb") as f:
+            master_key = f.read()
+        self.aof_manager = AOFManager(self.active_sessions, self.session_lock, master_key)
+
         # Initialize or clean up the uploads directory based on previous state
         has_active_sessions = (
             os.path.exists(self.aof_manager.snapshot_path) or os.path.exists(self.aof_manager.log_path)
@@ -50,15 +59,6 @@ class Server:
                 shutil.rmtree(self.upload_dir)
         if not os.path.exists(self.upload_dir):
             os.makedirs(self.upload_dir)
-
-        # Network and Concurrency Setup
-        self.active_sessions= {}
-        self.session_lock= threading.Lock()
-
-        key_path= os.path.join(os.path.dirname(os.path.abspath(__file__)), "secrets", "session_master.key")
-        with open(key_path, "rb") as f:
-            master_key = f.read()
-        self.aof_manager = AOFManager(self.active_sessions, self.session_lock, master_key)
 
         self.load_sessions()
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
