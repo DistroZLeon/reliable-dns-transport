@@ -14,6 +14,18 @@ from dotenv import load_dotenv
 from dnslib import *
 from transport import Packet, Fragmenter
 from crypto_utils import HandshakeManager, Channel, decode_qname, encode_txt, decode_txt, calc_checksum
+from aof_manager import AOFManager
+
+# Creating the session master key just once
+secrets_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "secrets")
+if not os.path.exists(secrets_dir):
+    os.makedirs(secrets_dir)
+
+session_master_key_file= os.path.join(secrets_dir, "session_master.key")
+if not os.path.exists(session_master_key_file):
+    session_master_key= os.urandom(32)
+    with open(session_master_key_file, "wb") as f:
+        f.write(session_master_key)
 
 # Main Server handling DNS/UDP multiplexing and session state
 class Server:
@@ -29,9 +41,9 @@ class Server:
         self.upload_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "uploads")
 
         # Initialize or clean up the uploads directory based on previous state
-        has_active_sessions = False
-        if os.path.exists(self.session_file) and os.path.getsize(self.session_file) > 2:
-            has_active_sessions = True
+        has_active_sessions = (
+            os.path.exists(self.aof_manager.snapshot_path) or os.path.exists(self.aof_manager.log_path)
+        )
 
         if not has_active_sessions:
             if os.path.exists(self.upload_dir):
@@ -40,8 +52,15 @@ class Server:
             os.makedirs(self.upload_dir)
 
         # Network and Concurrency Setup
-        self.active_sessions = self.load_sessions()
+        self.active_sessions= {}
         self.session_lock= threading.Lock()
+
+        key_path= os.path.join(os.path.dirname(os.path.abspath(__file__)), "secrets", "session_master.key")
+        with open(key_path, "rb") as f:
+            master_key = f.read()
+        self.aof_manager = AOFManager(self.active_sessions, self.session_lock, master_key)
+
+        self.load_sessions()
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
         self.sock.bind((self.udp_ip, self.udp_port))
 
@@ -51,66 +70,31 @@ class Server:
 
         print(f"* DNS Server listening on port {self.udp_port} for {self.domain}...")
 
-    # Save active sessions in .json for restart
-    def save_sessions(self):
-        safe_sessions= {}
-        for sess_id, data in self.active_sessions.items():
-            safe_data = {
-                "action": data.get("action"),
-                "filename": data.get("filename"),
-                "total_chunks": data.get("total_chunks"),
-                "last_written_seq": data.get("last_written_seq", 0)
-            }
-            if "client_key" in data and "server_key" in data:
-                safe_data["client_key"] = encode_txt(data["client_key"])
-                safe_data["server_key"] = encode_txt(data["server_key"])
-            if "expected_hash" in data:
-                safe_data["expected_hash"] = encode_txt(data["expected_hash"])
-                
-            safe_sessions[str(sess_id)] = safe_data
-
-        with open(self.session_file, "w") as f:
-            json.dump(safe_sessions, f, indent=4)
-        print("* Sessions saved to disk.")
-
     # Restore active session and related data from disk
     def load_sessions(self):
-        if not os.path.exists(self.session_file):
-            return {}
-            
-        with open(self.session_file, "r") as f:
-            try:
-                safe_sessions = json.load(f)
-            except json.JSONDecodeError:
-                return {}
+        if os.path.exists(self.aof_manager.snapshot_path):
+            with open(self.aof_manager.snapshot_path, "r") as f:
+                try:
+                    snapshot= json.load(f)
+                    for str_sid, data in snapshot.items():
+                        sid= int(str_sid)
 
-        restored_sessions = {}
-        for str_sess_id, data in safe_sessions.items():
-            sess_id = int(str_sess_id)
-            restored_data = {
-                "action": data.get("action"),
-                "filename": data.get("filename"),
-                "total_chunks": data.get("total_chunks"),
-                "last_written_seq": data.get("last_written_seq"),
-                "last_active": time.time()
-            }
-            
-            if "client_key" in data and "server_key" in data:
-                restored_data["client_key"] = decode_txt(data["client_key"])
-                restored_data["server_key"] = decode_txt(data["server_key"])
-            if "expected_hash" in data:
-                restored_data["expected_hash"] = decode_txt(data["expected_hash"])
-                
-            if data.get("filename") and os.path.exists(data["filename"]):
-                if data.get("action") == "upload":
-                    restored_data["file_handle"] = open(data["filename"], "ab")
-                elif data.get("action") == "download":
-                    restored_data["file_handle"] = open(data["filename"], "rb")
+                        client_key, server_key= self.aof_manager.decrypt_client_server_blobs(sid, data["client_key"], data["server_key"])
+                        data["client_key"]= client_key
+                        data["server_key"]= server_key
+                        data["last_active"]= time.time()
+                        
+                        if data.get("filename") and os.path.exists(data["filename"]):
+                            mode= "ab" if data.get("action")== "upload" else "rb"
+                            data["file_handle"]= open(data["filename"], mode)
+                        
+                        self.active_sessions[sid]= data
+                except json.JSONDecodeError:
+                    print("- Error decoding snapshot JSON.")
+        
+        self.aof_manager.replay_file()
+        print(f"* Restored {len(self.active_sessions)} sessions.")
                     
-            restored_sessions[sess_id] = restored_data
-            
-        print(f"* Restored {len(restored_sessions)} active sessions from disk.")
-        return restored_sessions
 
     # Calculate chunks and SHA-256 for integrity verification
     def get_file_metadata(self, filepath: str):
@@ -127,7 +111,7 @@ class Server:
                     
             return (total_chunks, sha256_hash.digest())
 
-    # # Free memory, close file handles, and delete temporary files
+    # Free memory, close file handles, and delete temporary files
     def cleanup_session(self, session_id: int, is_abandoned: bool= False):
         if session_id in self.active_sessions:
             data= self.active_sessions[session_id]
@@ -143,6 +127,8 @@ class Server:
                         print(f"- Deleted temporary/orphaned file: {filename}")
                     except Exception as e:
                         print(f"- Failed to delete file {filename}: {e}")
+            
+            self.aof_manager.delete(session_id= session_id)
             
             del self.active_sessions[session_id]
             print(f"+ Closed Session {session_id}.")
@@ -356,6 +342,8 @@ class Server:
             Fragmenter.init_empty(filepath)
             session["file_handle"] = open(filepath, "wb")
 
+            self.aof_manager.create(session_id= session_id, session= session)
+
             print(f"* Session {session_id} initiated UPLOAD for: {unique_filename}")
             return Packet(session_id=session_id, ack_num=seq_num, flags=Packet.ACK | SERVER_FLAG)
 
@@ -366,6 +354,10 @@ class Server:
                 if seq_num== expected_seq:
                     file_handle.write(packet.data)
                     session["last_written_seq"]= seq_num
+
+                    file_handle.flush()
+                    os.fsync(file_handle.fileno())
+                    self.aof_manager.update(session_id= session_id, seq= seq_num)
                 elif seq_num< expected_seq:
                     print(f"- DEBUG: Ignored duplicate chunk {seq_num}. Client must have missed the ACK.")
                 else:
@@ -441,6 +433,8 @@ class Server:
                 session["total_chunks"] = total_chunks
                 session["file_handle"] = open(filepath, "rb")
 
+                self.aof_manager.create(session_id= session_id, session= session)
+
                 meta_payload = struct.pack(">I32s", total_chunks, raw_hash)
                 print(f"+ Packed Metadata: {total_chunks} chunks + 32-byte raw hash.")
                 return Packet(session_id=session_id, ack_num=seq_num, flags=Packet.ACK | Packet.DAT | SERVER_FLAG, data=meta_payload)
@@ -461,6 +455,8 @@ class Server:
                     offset = (seq_num - 2) * Fragmenter.DOWNSTREAM_SIZE 
                     file_handle.seek(offset)
                     file_data = file_handle.read(Fragmenter.DOWNSTREAM_SIZE)
+
+                    self.aof_manager.update(session_id= session_id, seq= seq_num)
                     
                     resp_flags = Packet.ACK | Packet.DAT | SERVER_FLAG
 
@@ -492,6 +488,7 @@ class Server:
             if seq_num == expected_seq:
                 session["cmd_buffer"] += packet.data
                 session["last_written_seq"] = seq_num
+                self.aof_manager.update(session_id= session_id, seq= seq_num)
             elif seq_num < expected_seq:
                 print(f"- DEBUG: Ignored duplicate CMD chunk {seq_num}.")
                 if not packet.has_flag(Packet.FIN):
@@ -546,6 +543,8 @@ class Server:
             session["total_chunks"] = total_chunks
             session["file_handle"] = open(out_filepath, "rb")
 
+            self.aof_manager.create(session_id= session_id, session= session)
+
             meta_payload = struct.pack(">I32s", total_chunks, raw_hash)
             return Packet(session_id=session_id, ack_num=seq_num, flags=Packet.ACK | Packet.DAT | SERVER_FLAG, data=meta_payload)
 
@@ -556,9 +555,14 @@ class Server:
     def run(self):
         while True:
             try:
-                if time.time() - getattr(self, 'last_gc', 0) > 150:
+                current_time= time.time()
+                if current_time- getattr(self, 'last_gc', 0) > 150:
                     self.garbage_collect()
-                    self.last_gc= time.time()
+                    self.last_gc= current_time
+
+                if current_time- getattr(self, 'last_compaction', 0)> 300:
+                    self.aof_manager.trigger()
+                    self.last_compaction= current_time
 
                 try:
                     data, addr= self.sock.recvfrom(4096)
@@ -576,7 +580,7 @@ class Server:
                         fh = data.get("file_handle")
                         if fh and not fh.closed:
                             fh.close()
-                    self.save_sessions()
+                    self.aof_manager.compaction()
 
                 self.sock.close()
                 break

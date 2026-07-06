@@ -145,6 +145,8 @@ env.bak/
 venv.bak/
 
 uploads
+secrets
+aof
 sessions.json
 result.txt
 benchmark_results.png

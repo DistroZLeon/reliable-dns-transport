@@ -1,6 +1,7 @@
 import struct
 import base64
 import hashlib
+import os
 from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.hazmat.primitives import hashes, hmac
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
@@ -32,6 +33,16 @@ def calc_checksum(filepath: str)-> str:
         for byte_block in iter(lambda: f.read(4096), b""):
             sha256_hash.update(byte_block)
     return sha256_hash.hexdigest()
+
+def obtain_session_store_key(session_id: int, master_key: bytes)-> bytes:
+        store_string= f"session-store-encryption-key-{str(session_id)}"
+
+        return HKDF(
+                algorithm= hashes.SHA256(),
+                length= 32,
+                salt= None,
+                info= store_string.encode('utf-8')
+            ).derive(master_key)
 
 # Crypto Session Managers
 class HandshakeManager:
