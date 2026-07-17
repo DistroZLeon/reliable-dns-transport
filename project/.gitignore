@@ -144,6 +144,16 @@ ENV/
 env.bak/
 venv.bak/
 
+uploads
+secrets
+aof
+sessions.json
+result.txt
+benchmark_results.png
+bench_*.dat
+dl_tcp_*
+dl_dns_*
+
 # Spyder project settings
 .spyderproject
 .spyproject

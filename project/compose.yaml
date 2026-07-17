@@ -1,0 +1,24 @@
+services:
+  dns-server:
+    build: .
+    container_name: dns-server
+    ports:
+      - "53:53/udp"
+    restart: unless-stopped
+    environment:
+      - PYTHONUNBUFFERED=1
+    volumes:
+      - ./:/app
+
+  tcp-server:
+    image: python:3.14-slim
+    container_name: tcp-server
+    ports:
+      - "9000:9000/tcp"
+    environment:
+      - PYTHONUNBUFFERED=1
+    volumes:
+      - ./:/app
+    working_dir: /app
+    command: python3 tcp_server.py
+    restart: unless-stopped

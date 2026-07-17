@@ -1,0 +1,19 @@
+\section{Analiza detaliată a pachetelor în Wireshark}
+\label{anexa:wireshark}
+Această anexă conține capturile de ecran realizate în timpul testărilor. 
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.9\textwidth]{ws_query.jpg}
+    \caption{Detalierea QNAME-ului în traficul upstream}
+    \label{fig:ws_detaliu_query}
+\end{figure}
+
+Conform analizei din Capitolul 4, Figura~\ref{fig:ws_detaliu_query} accentuează dimensiunea numelui de domeniu folosit în transferul de date. Similar, răspunsurile de la server prezintă structura conturată în Figura~\ref{fig:ws_detaliu_response}.
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.9\textwidth]{ws_response.jpg}
+    \caption{Detalierea răspunsului din downstream și a extensiei EDNS}
+    \label{fig:ws_detaliu_response}
+\end{figure}

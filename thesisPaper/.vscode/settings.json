@@ -1,0 +1,50 @@
+{
+    "latex-workshop.latex.recipes": [
+        {
+            "name": "xelatex ➞ biber ➞ xelatex",
+            "tools": [
+                "xelatex",
+                "biber",
+                "xelatex",
+                "xelatex"
+            ]
+        }
+    ],
+    "latex-workshop.latex.tools": [
+        {
+            "name": "xelatex",
+            "command": "xelatex",
+            "args": [
+                "-synctex=1",
+                "-interaction=nonstopmode",
+                "-file-line-error",
+                "%DOC%"
+            ]
+        },
+        {
+            "name": "biber",
+            "command": "biber",
+            "args": [
+                "%DOCFILE%"
+            ]
+        }
+    ],
+    "latex-workshop.latex.clean.command": "cmd",
+    "latex-workshop.latex.clean.args": [
+        "/c",
+        "del",
+        "/q",
+        "/f",
+        "*.aux",
+        "*.bbl",
+        "*.bcf",
+        "*.blg",
+        "*.log",
+        "*.out",
+        "*.run.xml",
+        "*.toc",
+        "*.synctex.gz",
+        "*.fls",
+        "*.fdb_latexmk"
+    ],
+}

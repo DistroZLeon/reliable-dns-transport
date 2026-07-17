@@ -1,0 +1,17 @@
+\begin{abstractpage}
+
+\begin{abstract}{romanian}
+Concomitent cu progresul tehnologic, perimetrele de securitate ale sistemelor informatice și ale rețelelor au devenit mult mai stricte. Cu toate acestea, sistemul DNS încă rămâne un important vector de atac, susceptibil la comunicațiile ascunse.
+În această lucrare sunt prezentate structura, implementarea și evaluarea unui protocol securizat, bidirecțional, încadrat în tipologia Command-and-Control și exfiltrare de date. Acesta este construit exclusiv pe infrastructura DNS, având ca obiectiv principal conturarea unui nivel de transport fiabil, capabil să reziste mecanismelor de protecție automată a rețelelor, în special limitării ratei de transfer.
+Scopul este atins prin integrarea unui mecanism propriu de control al fluxului de trafic, de tip Stop-and-Wait ARQ. De asemenea, confidențialitatea și integritatea datelor sunt asigurate prin utilizarea algoritmilor ECDHE pentru stabilirea cheii de criptare, AES-GCM pentru criptarea și decriptarea autentificată a mesajelor, și HMAC cu un secret pre-partajat pentru prevenția atacurilor Man-in-the-Middle.
+Testele de performanță au demonstrat reziliența protocolului prin menținerea integrității datelor transferate în condiții de limitare a ratei impuse de ISP și de resolverii DNS. Așadar, lucrarea evidențiază amenințarea persistentă a canalelor ascunse și dovedește abilitatea primitivelor criptografice moderne, împreună cu un control riguros al fluxului, de a asigura transmiterea viabilă de date chiar și sub constrângerile dure impuse de rețelele contemporane.
+\end{abstract}
+
+\begin{abstract}{english}
+Alongside technological progress, the security perimeters of information systems and networks are hardening. Still, the Domain Name System remains an important attack vector, exploitable by covert communication.
+This thesis presents the structure, implementation and evaluation of a secure, bidirectional Command-and-Control and data exfiltration protocol. It is built exclusively over stateless DNS, its main objective being the engineering of a reliable transport layer capable of withstanding modern automated network defenses, specifically rate limiting. 
+This is achieved by integrating a custom Stop-and-Wait Automatic Repeat Request mechanism. Furthermore, the confidentiality and integrity of the payload are enforced using Ephemeral Elliptic Curve Diffie-Hellman for the establishment of the cryptographic key, AES-GCM for authenticated message encryption and decryption, and HMAC based on a master key for preventing Man-in-the-Middle attacks.
+The benchmarks have shown the resilience of the protocol by maintaining the integrity of the transferred data against the rate limiting of the ISP and DNS resolvers. Ultimately, the thesis emphasises the persistent threat brought by covert communication and proves the ability of modern cryptographic primitives, combined with strict flow control, to secure a viable data transfer channel even under contemporary network restrictions.
+\end{abstract}
+
+\end{abstractpage}

@@ -1,0 +1,106 @@
+\section{Preliminarii}
+
+Acest capitol stabilește fundamentul teoretic necesar pentru a înțelege arhitectura protocolului personalizat. În continuare, se explică funcționarea sistemului DNS ca mediu de transport și se analizează setul de primitive criptografice alese pentru securizarea canalului de comunicare. De asemenea, tot în această secțiune este prezentat stadiul curent al cercetării în domeniul canalelor ascunse, împreună cu limitările inerente ale soluțiilor existente.
+
+\subsection{Concepte fundamentale ale rețelei}
+Analiza modului de operare al sistemului DNS este esențială. Prin natura sa, DNS este un protocol \textit{stateless} bazat pe UDP (portul 53), conceput exclusiv pentru rezoluția numelor de domeniu. Serverul tratează fiecare cerere independent, clientul fiind obligat să trimită constant toate datele de stare.
+
+\subsubsection{Mecanismul de tunelare prin DNS}
+Deși rolul DNS-ului este corespondența nume-IP, neglijarea securității acestui protocol permite exploatări precum \textit{DNS Tunneling}. Arhitectura cere un domeniu controlat, un client compromis și un server de tunelare configurat ca \textit{name server autoritativ} pentru acel domeniu~\cite{farnham_dns_tunneling}.
+
+Deoarece informațiile exfiltrate nu pot fi transmise în text clar, ele sunt codificate. Metodele comune includ \textit{Base32} pentru atașarea datelor ca subdomeniu în eticheta QNAME și \textit{Base64} pentru secțiunea RDATA~\cite{farnham_dns_tunneling}. 
+
+Standardul pentru o tunelare robustă folosește înregistrări \textbf{TXT}, care permit șiruri arbitrare de până la 255 de octeți. Răspunsurile DNS pot conține multiple șiruri TXT, permițând un transfer \textit{downstream} superior celui \textit{upstream}. Mai mult, extensia EDNS depășește limita tradițională de 512 octeți a pachetelor UDP. Totuși, protocolul impune restricții stricte QNAME-urilor: o etichetă (porțiunea delimitată de puncte) nu poate depăși 63 de octeți, iar lungimea totală a numelui de domeniu este limitată la 255 de octeți~\cite{farnham_dns_tunneling}.
+
+\subsubsection{Limitările și protecțiile rețelelor}
+Rețelele sunt prudente cu protocoalele UDP deoarece facilitează atacurile de tip \textit{Denial-of-Service} (DoS). DNS este o țintă perfectă din trei motive principale~\cite{isc_rrl}:
+
+\begin{itemize}
+    \item \textbf{Lipsa verificării sursei:} Software-ul (ex. BIND) nu poate valida sursa pachetului, permițând falsificarea adresei pentru a viza o victimă.
+    \item \textbf{Politici ISP permisive:} Lipsa filtrării pachetelor falsificate la ieșirea din rețea facilitează atacurile de reflectare (\textit{Reflection Attacks}).
+    \item \textbf{Asimetria traficului:} O interogare \textbf{ANY} de 36 de octeți poate genera răspunsuri de peste 3500 de octeți. Această amplificare de 100 de ori este fundația atacurilor \textit{DNS Amplification}.
+\end{itemize}
+
+Deoarece filtrarea răspunsurilor legitime este dificilă, operatorii utilizează \textit{Response Rate Limiting} (RRL). Acest mecanism detectează răspunsurile similare frecvente folosind o schemă \textit{token bucket}. Fiecare combinație client-răspuns consumă un credit; la epuizarea acestuia, pachetele sunt aruncate (\textit{packet loss}), limitând rata de transfer~\cite{isc_rrl}.
+
+Suplimentar, echipamentele \textit{Next-Generation Firewalls} (NGFW) utilizează analize statistice. Deoarece \textit{payload}-ul este codificat în QNAME, domeniile rezultate prezintă o entropie informațională ridicată față de cele standard. Tunelele maximizează transferul (etichete de 63 de octeți, domenii de 255 de octeți) și generează nume cu o densitate nefirească de cifre. Din acest motiv, tunelurile tradiționale sunt foarte susceptibile la detecția automată~\cite{farnham_dns_tunneling}.
+
+\subsection{Primitive criptografice}
+Securitatea oferită de protocoalele criptografice tradiționale (precum TLS) este dificil de implementat peste DNS din cauza constrângerilor de dimensiune a pachetelor și a naturii \textit{stateless} specifice UDP. Așadar, lucrarea utilizează o suită de primitive moderne, selectate pentru eficiența spațială și robustețea matematică în context pre-cuantic.
+
+\subsubsection[Schimbul de chei (ECDHE)]{Schimbul de chei: Ephemeral Elliptic Curve Diffie-Hellman (ECDHE)}
+\textit{Diffie-Hellman} (DH) stabilește un secret comun pe un canal nesecurizat. Algoritmul implică un grup $\mathbf{G}$ de ordin $p$ (număr prim mare) cu un generator $g$. Părțile generează $a, b \in \mathbb{Z}_{p}^{x}$ și schimbă cheile publice $h_A= g^{a}$ și $h_B= g^{b}$, calculând secretul comun $K_A=h_B^{a}=h_A^{b}=K_B$. Securitatea se bazează pe dificultatea calculării logaritmului discret. Criptografia pe curbe eliptice (ECC) aplică aceste principii pe structura algebrică a curbelor eliptice, oferind un nivel de securitate echivalent dar utilizând chei semnificativ mai mici (\textit{Elliptic Curve Diffie-Hellman} - ECDH).
+
+Modul efemer (ECDHE) utilizează cheile generate pentru o singură sesiune. Odată stabilit secretul comun, calculele anterioare sunt eliminate, garantând \textit{Perfect Forward Secrecy} (PFS); compromiterea ulterioară a unei chei nu permite decriptarea traficului trecut. Conform standardelor NIST~\cite{nist_sp800_56Ar3}, secretul comun nu trebuie utilizat direct ca o cheie de criptare simetrică sau ca vector de inițializare, ci trebuie procesat printr-o schemă de derivare, precum \textit{HKDF}~\cite{rfc5869}, care execută doi pași:
+
+\begin{itemize}
+    \setlength{\itemsep}{0pt}
+    \setlength{\parskip}{0pt}
+    \item $\text{HKDF-Extract}(salt, \text{IKM}) \rightarrow \text{PRK}$
+    \item $\text{HKDF-Expand}(\text{PRK}, info, L) \rightarrow \text{OKM}$
+    \begin{itemize}
+        \setlength{\itemsep}{0pt}
+        \setlength{\parskip}{0pt}
+        \item \textbf{salt -} valoare aleatoare opțională (implicit, un șir de zerouri de lungime \textit{HashLen}).
+        \item \textbf{IKM -} materialul inițial (\textit{Input Keying Material} - secretul comun ECDHE).
+        \item \textbf{PRK -} cheie pseudoaleatoare de lungime \textit{HashLen}.
+        \item \textbf{info -} context opțional pentru legarea cheii de aplicație.
+        \item \textbf{L -} lungimea țintă a cheii.
+        \item \textbf{OKM -} cheia derivată de ieșire.
+    \end{itemize}
+\end{itemize}
+
+\subsubsection[Criptarea autentificată (AES-GCM)]{Criptarea autentificată: Advanced Encryption Standard in Galois/Counter Mode (AES-GCM)}
+AES este un algoritm de criptare pe blocuri de 128 biți, cu lungimi ale cheii de 128, 192 sau 256 biți. Independent, AES asigură doar confidențialitatea.
+
+\textit{Galois/Counter Mode} (GCM) este un mod de operare care extinde AES (modul \textit{Counter}) pentru a oferi criptare autentificată. Autenticitatea se obține printr-o funcție hash (\textit{GHASH}) pe un câmp binar Galois, detectând orice modificare malițioasă sau accidentală~\cite{nist_aesgcm}. Detaliat în \ref{anexa:cripto_aes-gcm}. GCM criptează datele și calculează o etichetă (\textit{tag}) pentru întregul mesaj, definind funcțiile:
+$$ \text{GCM-AE}_K( IV, P, A ) = ( C, T ) $$
+$$ \text{GCM-AD}_K( IV, C, A, T ) = P \text{ or } \mathit{FAIL} $$
+unde:
+\begin{itemize}
+    \setlength{\itemsep}{0pt}
+    \setlength{\parskip}{0pt}
+    \item \textbf{K -} cheia de criptare.
+    \item \textbf{IV -} vectorul de inițializare (\textit{nonce}).
+    \item \textbf{P -} textul în clar.
+    \item \textbf{C -} textul cifrat.
+    \item \textbf{A -} date adiționale autentificate.
+    \item \textbf{T -} eticheta de autentificare (\textit{tag}).
+\end{itemize}
+
+Pentru a menține securitatea funcției hash, probabilitatea reutilizării perechii $(IV, K)$ trebuie să fie sub $2^{-32}$.
+
+\subsubsection[Integritate și autentificare (HMAC)]{Integritate și autentificare: Hash-based Message Authentication Code (HMAC)}
+Un \textit{Message Authentication Code} (MAC) validează informația între entități care împart un secret. Varianta \textit{HMAC} folosește funcții hash criptografice iterative, securitatea sa depinzând de rezistența funcției utilizate~\cite{rfc2104}. Calculul HMAC este:
+
+$$ \text{HMAC}( K, m ) = \text{H}( (K \oplus \text{opad}) \parallel \text{H}( (K \oplus \text{ipad}) \parallel m) ) $$
+unde:
+\begin{itemize}
+    \setlength{\itemsep}{0pt}
+    \setlength{\parskip}{0pt}
+    \item \textbf{H -} funcția hash.
+    \item \textbf{B -} dimensiunea blocului (în octeți).
+    \item \textbf{L -} dimensiunea ieșirii funcției $H$.
+    \item \textbf{m -} mesajul autentificat.
+    \item \textbf{len(x) -} lungimea în biți a valorii $x$.
+    \item \textbf{K -} cheia secretă ($len(K) \geq L$; dacă $len(K) > B$, se folosește $H(K)$).
+    \item \textbf{ipad -} octetul \texttt{0x36} repetat de $B$ ori.
+    \item \textbf{opad -} octetul \texttt{0x5C} repetat de $B$ ori.
+\end{itemize}
+
+Pentru a spori securitatea și a limita expunerea informațiilor în cazul unei criptanalize, ieșirea poate fi trunchiată păstrând doar cei mai din stânga $t$ biți ($t \geq L/2$).
+
+\subsection{Stadiul actual (State of the Art)}
+Exploatarea vulnerabilităților prezente în DNS pentru exfiltrarea datelor, ocolirea Firewall-urilor și menținerea infrastructurilor de tip Command-and-Control a fost un subiect profund documentat în literatura de specialitate. Cu toate acestea, majoritatea soluțiilor existente nu reușesc să găsească un compromis între funcționalitatea brută și securitatea operațională, împreună cu fiabilitatea. Acestea decid să prioritizeze una dintre ele în detrimentul celeilalte.
+
+\subsubsection{Iodine și DNSCat2}
+Iodine și DNSCat2 sunt instrumente clasice de tunelare, axate pe funcționalitate pură, dar au lacune la nivel de securitate operațională și eficiență pe rețea.
+
+\textbf{Iodine}~\cite{iodine_dns} este conceput să creeze un tunel IPv4, utilizând interfețele TUN/TAP, peste DNS. Acesta prezintă o utilitate cuprinzătoare la nivelul rețelei, însă înglobarea pachetelor IP (cu antete mari) în înregistrări DNS conduce la o fragmentare majoră. Deci, se generează un volum masiv de cereri, lucru ce face Iodine să fie susceptibil la detectarea prin analiză volumetrică și la limitarea ratei de transfer. Pe lângă faptul că este „zgomotos”, instrumentul nu dispune nativ de o suită de primitive criptografice moderne. Utilizatorul este obligat să tuneleze protocoale complementare, precum SSH, pentru obținerea confidențialității, deci se creează mai mult trafic redundant.
+
+\textbf{DNSCat2}~\cite{dnscat2} este eficientizat strict pentru stabilirea canalelor de \textit{Command-and-Control} (C2). Suportă criptarea traficului, dar arhitectura criptografică folosită este arhaică comparativ cu standardele actuale. Protocolul nu asigură garanții prin \textit{Perfect Forward Secrecy} (PFS) sau prin criptare autentificată standardizată (AEAD). Este, astfel, nepotrivit și fragil în raport cu sistemele contemporane de analiză a traficului.
+
+\subsubsection{Sliver C2 și Noise Protocol Framework}
+La cealaltă extremă din perspectiva securității se află \textbf{Sliver C2}~\cite{sliver_c2}, un sistem avansat de securitate ofensivă ce prioritizează evaziunea și criptografia superioară. Pentru a securiza traficul, acesta include \textit{Noise Protocol Framework}~\cite{noise_protocol}, un standard criptografic ce asigură confidențialitatea, autentificarea și PFS, folosind primitive precum Curve25519, AES-GCM, ChaCha20.
+
+Totuși, nivelul de securitate ridicat periclitează funcționalitatea fiabilă peste DNS. \textit{Handshake}-ul din \textit{Noise} a fost proiectat pentru medii TCP sigure, deci, pe DNS realizează numeroase schimburi de pachete criptografice mari. Luând în considerare instabilitatea UDP, cu multe pierderi de pachete și filtre RRL, traficul din \textit{handshake} este fragmentat și stabilirea sesiunii eșuează. Deși este excelent criptografic, nu este un tunel DNS rezistent din cauza lipsei unui sistem de controlare a fluxului conceput pentru acest protocol.

@@ -1,0 +1,28 @@
+\section{Parametrii curbei eliptice SECP256R1}
+\label{anexa:cripto_ec}
+Securitatea algoritmului ECDHE se bazează pe dificultatea calculării logaritmului discret pe o curbă eliptică peste $\mathbb{Z}_p$ definită de ecuația $y^2 = x^3 + ax + b$ mod $p$, unde $4a^3 + 27b^2 \neq 0$ mod $p$. Constantele criptografice utilizate de protocol pentru curba \texttt{SECP256R1} sunt extrase din NIST SP 800-186~\cite{nist_sp800_186} și sunt enumerate în Tabela~\ref{tab:ec_specs}.
+
+\begin{table}[htbp]
+    \centering
+    \small
+    \renewcommand{\arraystretch}{1.1}
+    \begin{tabular}{|c|>{\raggedright\arraybackslash}p{13cm}|}
+        \hline
+        \textbf{Parametru} & \textbf{Valoare Hexazecimal} \\
+        \hline
+        Ordinul prim $p$ & \texttt{FFFFFFFF00000001000000000000000000000000FFFFFFFFFFFFFFFFFFFFFFFF} \\
+        \hline
+        Coeficientul $a$ & \texttt{FFFFFFFF00000001000000000000000000000000FFFFFFFFFFFFFFFFFFFFFFFC} \\
+        \hline
+        Coeficientul $b$ & \texttt{5AC635D8AA3A93E7B3EBBD55769886BC651D06B0CC53B0F63BCE3C3E27D2604B} \\
+        \hline
+        Punctul de bază $G_x$ & \texttt{6B17D1F2E12C4247F8BCE6E563A440F277037D812DEB33A0F4A13945D898C296} \\
+        \hline
+        Punctul de bază $G_y$ & \texttt{4FE342E2FE1A7F9B8EE7EB4A7C0F9E162BCE33576B315ECECBB6406837BF51F5} \\
+        \hline
+        Ordinul $n$ & \texttt{FFFFFFFF00000000FFFFFFFFFFFFFFFFBCE6FAADA7179E84F3B9CAC2FC632551} \\
+        \hline
+    \end{tabular}
+    \caption{Specificațiile curbei eliptice NIST P-256}
+    \label{tab:ec_specs}
+\end{table}

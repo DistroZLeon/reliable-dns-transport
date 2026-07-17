@@ -1,0 +1,67 @@
+\section{Arhitectura operațională AES-GCM}
+\label{anexa:cripto_aes-gcm}
+Pentru criptarea autentificată protocolul folosește \textit{AES} în modul \textit{GCM}. Procesul este împărțit în fluxul de criptare/decriptare, pe baza funcției GCTR, și calcularea etichetei de autentificare prin funcția GHASH. Operațiile acestea sunt prezentate vizual în Figurile~\ref{fig:aes_enc}--\ref{fig:aes_ghash}, urmate de definițiile matematice, informațiile fiind preluate din \textit{NIST Special Publication 800-38D} ~\cite{nist_aesgcm}.
+
+\begin{figure}[htbp]
+    \centering
+    \begin{minipage}[t]{0.48\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{aes-gcm_encryption.png}
+        \caption{Criptare AES-GCM}
+        \label{fig:aes_enc}
+    \end{minipage}\hfill
+    \begin{minipage}[t]{0.48\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{aes-gcm_decryption.png}
+        \caption{Decriptare AES-GCM}
+        \label{fig:aes_dec}
+    \end{minipage}
+\end{figure}
+
+\vspace{0.2cm}
+
+\begin{figure}[htbp]
+    \centering
+    \begin{minipage}[t]{0.48\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{gctr_function.png}
+        \caption{Operația GCTR}
+        \label{fig:aes_gctr}
+    \end{minipage}\hfill
+    \begin{minipage}[t]{0.48\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{ghash.png}
+        \caption{Generarea etichetei GHASH}
+        \label{fig:aes_ghash}
+    \end{minipage}
+\end{figure}
+
+\vspace{0.5cm}
+
+\paragraph{Funcția GHASH}
+Eticheta este calculată prin operații pe corpul finit Galois $\text{GF}(2^{128})$. Fie un șir de blocuri de 128 de biți $X_1, X_2, \dots, X_m$ și subcheia de hash $H = E_K(0^{128})$, funcția se definește iterativ:
+$$ Y_i = (Y_{i-1} \oplus X_i) \cdot H $$
+unde $Y_0 = 0^{128}$, și rezultatul $Y_m = \text{GHASH}_H(X)$. Înmulțirea se realizează modulo polinomul ireductibil $P(x) = x^{128} + x^7 + x^2 + x + 1$.
+
+\paragraph{Funcția GCTR}
+Criptarea este realizată prin modul \textit{CTR}. Pentru fiecare bloc de text în clar $X_i$ și valoarea contorului $CB_i$, textul cifrat $Y_i$ se calculează:
+$$ Y_i = X_i \oplus E_K(CB_i) $$
+unde $E_K$ este aplicarea algoritmului AES cu secretul $K$.
+
+\paragraph{Criptarea autentificată}
+Pentru a proteja atât datele adiționale ($A$), cât și textul cifrat ($C$), eticheta de autentificare finală $T$ (de lungime $t$) este calculată prin aplicarea funcției GHASH asupra concatenării acestora, urmată de o mascare XOR cu valoarea inițială a contorului criptat ($J_0$):
+$$ T = \text{MSB}_t \left( \text{GHASH}_H(A \parallel 0^v \parallel C \parallel 0^u \parallel \text{len}(A)_{64} \parallel \text{len}(C)_{64}) \oplus E_K(J_0) \right) $$
+
+\paragraph{Decriptarea autentificată}
+La primire, procesul de decriptare verifică autenticitatea datelor înainte de a returna textul în clar, pentru prevenția atacurilor de tip \textit{chosen-ciphertext}. Eticheta anticipată $T'$ este recalculată, utilizând datele adiționale $A$ și textul cifrat primit $C$:
+$$ T' = \text{MSB}_t \left( \text{GHASH}_H(A \parallel 0^v \parallel C \parallel 0^u \parallel \text{len}(A)_{64} \parallel \text{len}(C)_{64}) \oplus E_K(J_0) \right) $$
+
+Validarea integrității și extragerea textului în clar $P$ se fac în baza condiției:
+$$ P = 
+\begin{cases} 
+\text{GCTR}_K(J_0, C), & \text{dacă } T = T' \\ 
+\mathit{FAIL}, & \text{dacă } T \neq T' 
+\end{cases} 
+$$
+
+Dacă verificarea eșuează, se întoarce o eroare, iar blocurile decriptate sunt distruse din memorie, garantându-se că pachetele malformate pe rețea sunt respinse imediat.
